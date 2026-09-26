@@ -2735,12 +2735,43 @@ class _ContactsScreenState extends State<ContactsScreen> {
   final TextEditingController _nameController = TextEditingController();
   final ScrollController _headerScrollController = ScrollController();
   final Set<String> _sendingRequestUids = <String>{};
+  bool _isConfiguredOwner = false;
+  bool _checkingOwnerPermission = false;
+
+  bool get _canAddScopedContacts =>
+      widget.scope == ContactScope.regular ||
+      !firebaseReady ||
+      _isConfiguredOwner;
 
   @override
   void initState() {
     super.initState();
     if (widget.scope == ContactScope.room) {
+      _isConfiguredOwner = widget.ownerVerified;
       unawaited(refreshSecretRoomMemberNotifier());
+    } else if (widget.scope == ContactScope.group) {
+      unawaited(_loadGroupOwnerPermission());
+    }
+  }
+
+  Future<void> _loadGroupOwnerPermission() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (!firebaseReady || user == null) return;
+    if (mounted) setState(() => _checkingOwnerPermission = true);
+    try {
+      final ownerSnapshot = await FirebaseFirestore.instance
+          .collection('config')
+          .doc('app')
+          .get();
+      if (mounted) {
+        setState(() {
+          _isConfiguredOwner = ownerSnapshot.data()?['ownerUid'] == user.uid;
+        });
+      }
+    } catch (error) {
+      debugPrint('Group owner verification error: $error');
+    } finally {
+      if (mounted) setState(() => _checkingOwnerPermission = false);
     }
   }
 
@@ -2972,6 +3003,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final String name = _nameController.text.trim();
     final User? user = FirebaseAuth.instance.currentUser;
     if (input.isEmpty) return;
+    if (!_canAddScopedContacts) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('إضافة أعضاء المجموعة متاحة لمالك التطبيق فقط')),
+      );
+      return;
+    }
 
     if (!firebaseReady || user == null) {
       final targetUid = publicId.isEmpty ? 'local_${DateTime.now().millisecondsSinceEpoch}' : publicId;
@@ -3154,6 +3191,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
       }
       return;
     }
+    if (!_canAddScopedContacts) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('إضافة أعضاء المجموعة متاحة لمالك التطبيق فقط')),
+      );
+      return;
+    }
     if (targetUid == user.uid) {
       return;
     }
@@ -3318,7 +3361,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       },
                     ),
                   const SizedBox(height: 8),
-                  if (firebaseReady)
+                  if (firebaseReady && _canAddScopedContacts)
                     StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                       stream: FirebaseFirestore.instance
                           .collection('publicProfiles')
@@ -3390,40 +3433,52 @@ class _ContactsScreenState extends State<ContactsScreen> {
                         );
                       },
                     ),
-                  TextField(
-                    controller: _contactIdController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(
-                      labelText: 'المعرّف السهل',
-                      hintText: 'SC-A1B2C3',
-                      prefixIcon: Icon(Icons.badge_outlined),
-                    ),
-                  ),
-                  TextField(
-                    controller: _nameController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(
-                      labelText: 'اسم جهة الاتصال',
-                      prefixIcon: Icon(Icons.person_outline),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: _addContact,
-                      icon: const Icon(Icons.person_add_alt_1),
-                      label: Text(
-                        widget.scope == ContactScope.regular
-                            ? 'إرسال طلب'
-                            : 'إضافة عضو',
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF38E8A5),
-                        foregroundColor: Colors.black,
+                  if (_canAddScopedContacts) ...[
+                    TextField(
+                      controller: _contactIdController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                        labelText: 'المعرّف السهل',
+                        hintText: 'SC-A1B2C3',
+                        prefixIcon: Icon(Icons.badge_outlined),
                       ),
                     ),
-                  ),
+                    TextField(
+                      controller: _nameController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                        labelText: 'اسم جهة الاتصال',
+                        prefixIcon: Icon(Icons.person_outline),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _addContact,
+                        icon: const Icon(Icons.person_add_alt_1),
+                        label: Text(
+                          widget.scope == ContactScope.regular
+                              ? 'إرسال طلب'
+                              : 'إضافة عضو',
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF38E8A5),
+                          foregroundColor: Colors.black,
+                        ),
+                      ),
+                    ),
+                  ] else if (widget.scope != ContactScope.regular) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        _checkingOwnerPermission
+                            ? 'جارٍ التحقق من صلاحية المالك...'
+                            : 'إضافة أعضاء المجموعة متاحة لمالك التطبيق فقط',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                  ],
                   Align(
                     alignment: Alignment.center,
                     child: TextButton.icon(
