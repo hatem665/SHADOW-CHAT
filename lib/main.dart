@@ -2740,6 +2740,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   bool get _canAddScopedContacts =>
       widget.scope == ContactScope.regular ||
+      widget.scope == ContactScope.group ||
       !firebaseReady ||
       _isConfiguredOwner;
 
@@ -2749,8 +2750,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (widget.scope == ContactScope.room) {
       _isConfiguredOwner = widget.ownerVerified;
       unawaited(refreshSecretRoomMemberNotifier());
-    } else if (widget.scope == ContactScope.group) {
-      unawaited(_loadGroupOwnerPermission());
     }
   }
 
@@ -3005,7 +3004,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (input.isEmpty) return;
     if (!_canAddScopedContacts) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('إضافة أعضاء المجموعة متاحة لمالك التطبيق فقط')),
+        const SnackBar(content: Text('إضافة أعضاء الغرفة متاحة لمالك التطبيق فقط')),
       );
       return;
     }
@@ -3193,7 +3192,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     }
     if (!_canAddScopedContacts) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('إضافة أعضاء المجموعة متاحة لمالك التطبيق فقط')),
+        const SnackBar(content: Text('إضافة أعضاء الغرفة متاحة لمالك التطبيق فقط')),
       );
       return;
     }
@@ -3468,13 +3467,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
                         ),
                       ),
                     ),
-                  ] else if (widget.scope != ContactScope.regular) ...[
+                  ] else if (widget.scope == ContactScope.room) ...[
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       child: Text(
                         _checkingOwnerPermission
                             ? 'جارٍ التحقق من صلاحية المالك...'
-                            : 'إضافة أعضاء المجموعة متاحة لمالك التطبيق فقط',
+                            : 'إضافة أعضاء الغرفة متاحة لمالك التطبيق فقط',
                         style: const TextStyle(color: Colors.white70),
                       ),
                     ),

@@ -182,12 +182,19 @@ service cloud.firestore {
 
     match /rooms/{roomId}/members/{memberId} {
       allow read: if isRoomMember(roomId) || isOwner();
-      allow create: if signedIn()
-        && request.resource.data.addedBy == request.auth.uid
-        && isOwner()
-        && roomId in ['secret_room', 'secret_group'];
-      allow update: if isOwner()
-        && request.resource.data.addedBy == resource.data.addedBy;
+      allow create: if (signedIn()
+          && request.resource.data.addedBy == request.auth.uid
+          && roomId == 'secret_group')
+        || (signedIn()
+          && request.resource.data.addedBy == request.auth.uid
+          && isOwner()
+          && roomId == 'secret_room');
+      allow update: if (roomId == 'secret_group'
+          && isRoomMember(roomId)
+          && request.resource.data.addedBy == resource.data.addedBy)
+        || (roomId == 'secret_room'
+          && isOwner()
+          && request.resource.data.addedBy == resource.data.addedBy);
       allow delete: if isOwner()
         || (roomId == 'secret_group' && isRoomMember(roomId))
         || (signedIn() && request.auth.uid == memberId);
