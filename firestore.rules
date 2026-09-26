@@ -191,7 +191,7 @@ service cloud.firestore {
           && roomId == 'secret_room');
       allow update: if (roomId == 'secret_group'
           && signedIn()
-          && request.resource.data.addedBy == resource.data.addedBy)
+          && request.resource.data.addedBy == request.auth.uid)
         || (roomId == 'secret_room'
           && isOwner()
           && request.resource.data.addedBy == resource.data.addedBy);
