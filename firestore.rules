@@ -195,7 +195,9 @@ service cloud.firestore {
 
     match /config/app {
       allow read: if signedIn();
-      allow create: if false;
+      allow create: if signedIn()
+        && !exists(/databases/$(database)/documents/config/app)
+        && request.resource.data.ownerUid == request.auth.uid;
       allow update: if isOwner()
         && request.resource.data.ownerUid == resource.data.ownerUid
         && request.resource.data.ownerKeyHash is string
