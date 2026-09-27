@@ -41,6 +41,12 @@ service cloud.firestore {
       return signedIn()
         && get(/databases/$(database)/documents/rooms/$(roomId)).data.ownerUid == request.auth.uid;
     }
+    function secretRoomCapacityPath() {
+      return /databases/$(database)/documents/rooms/secret_room/metadata/capacity;
+    }
+    function secretRoomMemberPath(memberId) {
+      return /databases/$(database)/documents/rooms/secret_room/members/$(memberId);
+    }
 
     function canAccessSecretChat(chatId) {
       return (isPrivateSecretGroup(chatId) && isRoomMember(chatId))
@@ -226,9 +232,13 @@ service cloud.firestore {
           && (isPrivateSecretGroupOwner(roomId) || isRoomMember(roomId))
           && request.resource.data.addedBy == request.auth.uid)
         || (roomId == 'secret_room'
-          && signedIn()
+          && isOwner()
           && request.resource.data.addedBy == request.auth.uid
-          && isOwner());
+          && get(secretRoomCapacityPath()).data.memberCount is int
+          && get(secretRoomCapacityPath()).data.memberCount < 100
+          && getAfter(secretRoomCapacityPath()).data.memberCount
+            == get(secretRoomCapacityPath()).data.memberCount + 1
+          && getAfter(secretRoomCapacityPath()).data.lastMemberId == memberId);
       allow update: if (isPrivateSecretGroup(roomId)
           && isRoomMember(roomId)
           && request.resource.data.addedBy == resource.data.addedBy)
@@ -238,8 +248,52 @@ service cloud.firestore {
       allow delete: if (isPrivateSecretGroup(roomId)
           && (isPrivateSecretGroupOwner(roomId)
             || (signedIn() && request.auth.uid == memberId)))
-        || (roomId == 'secret_room' && isOwner())
-        || (signedIn() && request.auth.uid == memberId);
+        || (roomId == 'secret_room'
+          && (isOwner() || (signedIn() && request.auth.uid == memberId))
+          && (!exists(secretRoomCapacityPath())
+            || (get(secretRoomCapacityPath()).data.memberCount is int
+              && get(secretRoomCapacityPath()).data.memberCount > 0
+              && getAfter(secretRoomCapacityPath()).data.memberCount
+                == get(secretRoomCapacityPath()).data.memberCount - 1
+              && getAfter(secretRoomCapacityPath()).data.lastMemberId == memberId)))
+        || (roomId == 'secret_group'
+          && signedIn()
+          && request.auth.uid == memberId);
+    }
+
+    match /rooms/secret_room/metadata/capacity {
+      allow read: if isOwner() || isRoomMember('secret_room');
+      allow create: if isOwner()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.memberCount is int
+        && request.resource.data.memberCount >= 1
+        && request.resource.data.memberCount <= 100;
+      allow update: if request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['memberCount', 'lastMemberId', 'updatedAt'])
+        && request.resource.data.memberCount is int
+        && (
+          (isOwner()
+            && request.resource.data.memberCount == resource.data.memberCount + 1
+            && request.resource.data.memberCount <= 100
+            && request.resource.data.lastMemberId is string
+            && getAfter(secretRoomMemberPath(
+              request.resource.data.lastMemberId
+            )).data.addedBy == request.auth.uid)
+          || ((isOwner()
+                || (signedIn()
+                  && request.auth.uid == request.resource.data.lastMemberId))
+              && request.resource.data.memberCount == resource.data.memberCount - 1
+              && request.resource.data.memberCount >= 0
+              && request.resource.data.lastMemberId is string
+              && exists(secretRoomMemberPath(
+                request.resource.data.lastMemberId
+              ))
+              && !existsAfter(secretRoomMemberPath(
+                request.resource.data.lastMemberId
+              )))
+        );
+      allow delete: if false;
     }
 
     match /config/app {

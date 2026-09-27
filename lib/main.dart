@@ -59,20 +59,177 @@ bool isSecretRoomAtCapacity(int memberCount) {
   return memberCount >= maxSecretRoomMembers;
 }
 
+DocumentReference<Map<String, dynamic>> secretRoomCapacityReference() =>
+    FirebaseFirestore.instance
+        .collection('rooms')
+        .doc('secret_room')
+        .collection('metadata')
+        .doc('capacity');
+
 Future<int> countRoomMembers(String roomId) async {
   if (!firebaseReady) return 0;
   try {
+    if (roomId == 'secret_room') {
+      final capacity = await secretRoomCapacityReference().get();
+      final storedCount = capacity.data()?['memberCount'];
+      if (storedCount is int) return storedCount;
+    }
     final snapshot = await FirebaseFirestore.instance
         .collection('rooms')
         .doc(roomId)
         .collection('members')
         .limit(maxSecretRoomMembers + 1)
         .get();
-    return snapshot.docs.length;
+    var memberCount = snapshot.docs.length;
+    if (roomId == 'secret_room') {
+      final owner = await FirebaseFirestore.instance
+          .collection('config')
+          .doc('app')
+          .get();
+      final ownerUid = owner.data()?['ownerUid'];
+      if (ownerUid is String &&
+          !snapshot.docs.any((member) => member.id == ownerUid)) {
+        memberCount++;
+      }
+    }
+    return memberCount;
   } catch (error) {
     debugPrint('Room member count failed for $roomId: $error');
     return 0;
   }
+}
+
+Future<void> ensureSecretRoomCapacityInitialized() async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (!firebaseReady || user == null) {
+    throw StateError('يلزم تسجيل الدخول لتهيئة سعة الغرفة');
+  }
+
+  final capacityRef = secretRoomCapacityReference();
+  if ((await capacityRef.get()).exists) return;
+
+  final ownerSnapshot = await FirebaseFirestore.instance
+      .collection('config')
+      .doc('app')
+      .get();
+  if (ownerSnapshot.data()?['ownerUid'] != user.uid) {
+    throw StateError('تهيئة سعة الغرفة متاحة للمالك فقط');
+  }
+
+  final members = await FirebaseFirestore.instance
+      .collection('rooms')
+      .doc('secret_room')
+      .collection('members')
+      .limit(maxSecretRoomMembers + 1)
+      .get();
+  final ownerAlreadyListed = members.docs.any((member) => member.id == user.uid);
+  final existingCount = members.docs.length + (ownerAlreadyListed ? 0 : 1);
+  final initialCount =
+      existingCount.clamp(1, maxSecretRoomMembers).toInt();
+
+  try {
+    await capacityRef.set({
+      'ownerUid': user.uid,
+      'memberCount': initialCount,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  } catch (error) {
+    if (!(await capacityRef.get()).exists) rethrow;
+  }
+}
+
+Future<bool> addSecretRoomMemberWithCapacity({
+  required String memberId,
+  required String displayName,
+}) async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (!firebaseReady || user == null || memberId.isEmpty) {
+    throw StateError('تعذر التحقق من المستخدم الحالي');
+  }
+  if (memberId == user.uid) return false;
+
+  final ownerSnapshot = await FirebaseFirestore.instance
+      .collection('config')
+      .doc('app')
+      .get();
+  if (ownerSnapshot.data()?['ownerUid'] != user.uid) {
+    throw StateError('إضافة أعضاء الغرفة متاحة للمالك فقط');
+  }
+  await ensureSecretRoomCapacityInitialized();
+
+  final firestore = FirebaseFirestore.instance;
+  final capacityRef = secretRoomCapacityReference();
+  final memberRef = firestore
+      .collection('rooms')
+      .doc('secret_room')
+      .collection('members')
+      .doc(memberId);
+  final added = await firestore.runTransaction<bool>((transaction) async {
+    final capacity = await transaction.get(capacityRef);
+    final existingMember = await transaction.get(memberRef);
+    if (existingMember.exists) return false;
+    final memberCount = capacity.data()?['memberCount'];
+    if (memberCount is! int) {
+      throw StateError('عداد سعة الغرفة غير مهيأ');
+    }
+    if (isSecretRoomAtCapacity(memberCount)) {
+      throw StateError('تم الوصول للحد الأقصى 100 عضو');
+    }
+    transaction.set(memberRef, {
+      'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
+      'addedBy': user.uid,
+      'addedAt': FieldValue.serverTimestamp(),
+    });
+    transaction.update(capacityRef, {
+      'memberCount': memberCount + 1,
+      'lastMemberId': memberId,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+  if (added) await refreshSecretRoomMemberNotifier();
+  return added;
+}
+
+Future<bool> removeSecretRoomMemberWithCapacity(String memberId) async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (!firebaseReady || user == null || memberId.isEmpty) return false;
+
+  final firestore = FirebaseFirestore.instance;
+  final capacityRef = secretRoomCapacityReference();
+  final memberRef = firestore
+      .collection('rooms')
+      .doc('secret_room')
+      .collection('members')
+      .doc(memberId);
+  if (!(await capacityRef.get()).exists) {
+    final ownerSnapshot = await firestore.collection('config').doc('app').get();
+    if (ownerSnapshot.data()?['ownerUid'] == user.uid) {
+      await ensureSecretRoomCapacityInitialized();
+    } else {
+      await memberRef.delete();
+      await refreshSecretRoomMemberNotifier();
+      return true;
+    }
+  }
+  final removed = await firestore.runTransaction<bool>((transaction) async {
+    final capacity = await transaction.get(capacityRef);
+    final member = await transaction.get(memberRef);
+    if (!member.exists) return false;
+    final memberCount = capacity.data()?['memberCount'];
+    if (memberCount is! int || memberCount <= 0) {
+      throw StateError('عداد سعة الغرفة غير متسق');
+    }
+    transaction.delete(memberRef);
+    transaction.update(capacityRef, {
+      'memberCount': memberCount - 1,
+      'lastMemberId': memberId,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+  if (removed) await refreshSecretRoomMemberNotifier();
+  return removed;
 }
 
 Future<void> refreshSecretRoomMemberNotifier() async {
@@ -84,8 +241,16 @@ Future<void> refreshSecretRoomMemberNotifier() async {
         .doc(roomId)
         .collection('members')
         .get();
-    secretRoomMembersNotifier.value =
-        snapshot.docs.map((doc) => doc.id).toList();
+    final memberIds = snapshot.docs.map((doc) => doc.id).toList();
+    final owner = await FirebaseFirestore.instance
+      .collection('config')
+      .doc('app')
+      .get();
+    final ownerUid = owner.data()?['ownerUid'];
+    if (ownerUid is String && !memberIds.contains(ownerUid)) {
+      memberIds.add(ownerUid);
+    }
+    secretRoomMembersNotifier.value = memberIds;
   } catch (error) {
     debugPrint('Secret room member refresh failed: $error');
   }
@@ -1375,7 +1540,18 @@ String firebaseWriteFailureMessage(Object error) {
   if (error is FirebaseException) {
     return 'تعذرت الإضافة في Firebase (${error.code}). تحقق من تسجيل الدخول والاتصال وقواعد المشروع.';
   }
+  if (error is StateError) return error.message.toString();
   return 'تعذرت الإضافة في Firebase. تحقق من الاتصال وإعدادات المشروع.';
+}
+
+Future<void> addSecretRoomMember({
+  required String targetUid,
+  required String displayName,
+}) async {
+  await addSecretRoomMemberWithCapacity(
+    memberId: targetUid,
+    displayName: displayName,
+  );
 }
 
 Future<void> updatePresence(bool isOnline) async {
@@ -2201,8 +2377,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
             onPressed: () async {
               final String password = passwordController.text.trim();
               if (password.length < 4) return;
-              try {
-                await saveChatPassword(chatId ?? chatName, password);
+                              const Text(
+                                'محتوى الغرفة متاح للأعضاء المصرح لهم فقط ولا يظهر في السجل الرئيسي للتطبيق.',
               } catch (error) {
                 debugPrint('Chat password save error: $error');
                 return;
@@ -3041,29 +3217,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (widget.scope != ContactScope.regular) {
       final roomId = groupId ?? 'secret_room';
       if (widget.scope == ContactScope.room) {
-        final memberCount = await countRoomMembers(roomId);
-        if (isSecretRoomAtCapacity(memberCount)) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('تم الوصول إلى الحد الأقصى 100 عضو في الغرفة السرية'),
-                backgroundColor: Colors.redAccent,
-              ),
-            );
-          }
-          return;
-        }
-        await FirebaseFirestore.instance
-            .collection('rooms')
-            .doc(roomId)
-            .collection('members')
-            .doc(targetUid)
-            .set({
-              'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
-              'addedBy': user.uid,
-              'addedAt': FieldValue.serverTimestamp(),
-            });
-        await refreshSecretRoomMemberNotifier();
+        await addSecretRoomMember(
+          targetUid: targetUid,
+          displayName: displayName.isEmpty ? 'جهة اتصال' : displayName,
+        );
       } else {
         final firestore = FirebaseFirestore.instance;
         final roomSnapshot = await firestore.collection('rooms').doc(roomId).get();
@@ -3590,7 +3747,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       stream: FirebaseFirestore.instance
                           .collection('publicProfiles')
                           .orderBy('updatedAt', descending: true)
-                          .limit(8)
                           .snapshots(),
                       builder: (context, snapshot) {
                         final docs = snapshot.data?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
@@ -4021,12 +4177,8 @@ class _SecretRoomScreenState extends State<SecretRoomScreen>
                             }
                             return;
                           }
-                          if (isOwner && !membership.exists) {
-                            await membershipReference.set({
-                              'displayName': 'مالك الغرفة',
-                              'addedBy': user.uid,
-                              'addedAt': FieldValue.serverTimestamp(),
-                            });
+                          if (isOwner) {
+                            await ensureSecretRoomCapacityInitialized();
                           }
                       }
                     } catch (error) {
@@ -4257,35 +4409,31 @@ class _SecretRoomScreenState extends State<SecretRoomScreen>
                                       ),
                                     ),
                                     onTap: () async {
-                                      final memberCount = await countRoomMembers('secret_room');
-                                      if (isSecretRoomAtCapacity(memberCount)) {
+                                      try {
+                                        await addSecretRoomMember(
+                                          targetUid: contact.id,
+                                          displayName: data['displayName'] ??
+                                              'جهة اتصال',
+                                        );
                                         if (dialogContext.mounted) {
-                                          ScaffoldMessenger.of(dialogContext).showSnackBar(
-                                            const SnackBar(
-                                              content: Text('تم الوصول إلى الحد الأقصى 100 عضو في الغرفة السرية'),
+                                          Navigator.pop(dialogContext);
+                                        }
+                                      } catch (error) {
+                                        if (dialogContext.mounted) {
+                                          ScaffoldMessenger.of(
+                                            dialogContext,
+                                          ).showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                firebaseWriteFailureMessage(
+                                                  error,
+                                                ),
+                                              ),
                                               backgroundColor: Colors.redAccent,
                                             ),
                                           );
                                         }
-                                        return;
                                       }
-
-                                      await FirebaseFirestore.instance
-                                          .collection('rooms')
-                                          .doc('secret_room')
-                                          .collection('members')
-                                          .doc(contact.id)
-                                          .set({
-                                            'displayName':
-                                                data['displayName'] ??
-                                                'جهة اتصال',
-                                            'addedBy': owner?.uid,
-                                            'addedAt':
-                                                FieldValue.serverTimestamp(),
-                                          });
-                                      await refreshSecretRoomMemberNotifier();
-                                      if (dialogContext.mounted)
-                                        Navigator.pop(dialogContext);
                                     },
                                   );
                                 },
@@ -4506,24 +4654,24 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
     }
 
     try {
-      await FirebaseFirestore.instance
-          .collection('rooms')
-          .doc(widget.roomId)
-          .collection('members')
-          .doc(memberId)
-          .delete();
+      if (_isSecretRoom) {
+        await removeSecretRoomMemberWithCapacity(memberId);
+      } else {
+        await FirebaseFirestore.instance
+            .collection('rooms')
+            .doc(widget.roomId)
+            .collection('members')
+            .doc(memberId)
+            .delete();
+      }
 
       if (_isSecretGroup) {
-          await FirebaseFirestore.instance
+        await FirebaseFirestore.instance
             .collection('users')
             .doc(memberId)
             .collection('secretGroups')
             .doc(widget.roomId)
             .delete();
-      }
-
-      if (_isSecretRoom) {
-        await refreshSecretRoomMemberNotifier();
       }
 
       if (mounted) {
@@ -4641,6 +4789,7 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
                   final currentUid = FirebaseAuth.instance.currentUser?.uid;
                   final visibleMembers = snapshot.data!.docs.where((member) {
                     if (_isSecretGroup) return true;
+                    if (_isSecretRoom && _ownerVerifiedForRoom) return true;
                     final addedAt = member.data()['addedAt'];
                     if (currentUid != null && member.id == currentUid) {
                       return true;
@@ -4959,12 +5108,16 @@ class _SecretChatScreenState extends State<SecretChatScreen>
     final roomId = _roomId;
     final isPrivateGroup = roomId.startsWith('secret_group_');
     try {
-      await FirebaseFirestore.instance
-          .collection('rooms')
-          .doc(roomId)
-          .collection('members')
-          .doc(user.uid)
-          .delete();
+      if (isPrivateGroup) {
+        await FirebaseFirestore.instance
+            .collection('rooms')
+            .doc(roomId)
+            .collection('members')
+            .doc(user.uid)
+            .delete();
+      } else {
+        await removeSecretRoomMemberWithCapacity(user.uid);
+      }
       await FirebaseFirestore.instance
           .collection('users')
           .doc(user.uid)
@@ -5167,9 +5320,10 @@ class _SecretChatScreenState extends State<SecretChatScreen>
       final fileName = 'secret_${mediaType}_${DateTime.now().millisecondsSinceEpoch}_${file.name}';
       final uploadTask = FirebaseStorage.instance
           .ref()
-          .child('users')
-          .child(user.uid)
+          .child('rooms')
+          .child(_roomId)
           .child('secret_media')
+          .child(user.uid)
           .child(mediaType)
           .child(fileName)
           .putFile(File(file.path));
