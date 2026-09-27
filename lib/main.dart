@@ -98,10 +98,8 @@ final ValueNotifier<bool> appLockEnabledNotifier = ValueNotifier<bool>(false);
 final ValueNotifier<String?> appLockPasswordNotifier = ValueNotifier<String?>(
   null,
 );
-final ValueNotifier<bool> ghostModeNotifier = ValueNotifier<bool>(true);
-final ValueNotifier<bool> autoDeleteMessagesNotifier = ValueNotifier<bool>(
-  true,
-);
+final ValueNotifier<bool> ghostModeNotifier = ValueNotifier<bool>(false);
+final ValueNotifier<bool> autoDeleteMessagesNotifier = ValueNotifier<bool>(false);
 final ValueNotifier<bool> secretGroupLockEnabledNotifier =
     ValueNotifier<bool>(false);
 final ValueNotifier<String?> secretGroupPasswordHashNotifier =
@@ -563,21 +561,34 @@ Future<void> savePrivacySetting(String key, bool value) async {
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) return;
   try {
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .collection('settings')
-        .doc('privacy')
-        .set({
-          key: value,
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
+    final firestore = FirebaseFirestore.instance;
+    final batch = firestore.batch();
+    batch.set(
+      firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('settings')
+          .doc('privacy'),
+      {key: value, 'updatedAt': FieldValue.serverTimestamp()},
+      SetOptions(merge: true),
+    );
     if (key == 'ghostMode') {
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+      final presenceData = {
         'ghostMode': value,
         'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+      };
+      batch.set(
+        firestore.collection('users').doc(user.uid),
+        presenceData,
+        SetOptions(merge: true),
+      );
+      batch.set(
+        firestore.collection('publicProfiles').doc(user.uid),
+        presenceData,
+        SetOptions(merge: true),
+      );
     }
+    await batch.commit();
   } catch (error) {
     debugPrint('Privacy setting save error: $error');
   }
@@ -693,9 +704,18 @@ Future<Map<String, dynamic>> loadPrivacySettings() async {
         .get();
     final data = snapshot.data() ?? {};
     if (data['ghostMode'] is bool) {
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-        'ghostMode': data['ghostMode'],
-      }, SetOptions(merge: true));
+      final ghostMode = data['ghostMode'] as bool;
+      ghostModeNotifier.value = ghostMode;
+      await FirebaseFirestore.instance
+          .collection('publicProfiles')
+          .doc(user.uid)
+          .set({'ghostMode': ghostMode}, SetOptions(merge: true));
+    }
+    if (data['autoDeleteMessages'] is bool) {
+      autoDeleteMessagesNotifier.value = data['autoDeleteMessages'] as bool;
+    }
+    if (data['messageSound'] is bool) {
+      messageSoundNotifier.value = data['messageSound'] as bool;
     }
     return data;
   } catch (error) {
@@ -1333,11 +1353,14 @@ Future<void> updatePresence(bool isOnline) async {
   if (user == null) return;
   try {
     final now = Timestamp.now();
-    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-      'isOnline': isOnline,
-      'lastSeen': now,
-      'lastSeenAt': now,
-    }, SetOptions(merge: true));
+    await FirebaseFirestore.instance
+        .collection('publicProfiles')
+        .doc(user.uid)
+        .set({
+          'isOnline': isOnline,
+          'lastSeen': now,
+          'lastSeenAt': now,
+        }, SetOptions(merge: true));
   } catch (error) {
     debugPrint('Presence update error: $error');
   }
@@ -1480,6 +1503,7 @@ class _AuthGateState extends State<AuthGate> {
     try {
       await FirebaseAuth.instance.signInAnonymously();
       await ensureUserProfile();
+      await loadPrivacySettings();
       await loadRoomOwnerKey();
       await loadSecretRoomCode();
       await setupPushNotifications();
@@ -1501,6 +1525,7 @@ class _AuthGateState extends State<AuthGate> {
     try {
       await ensureUserProfile();
       await setupPushNotifications();
+      await loadPrivacySettings();
       await loadAppLockSettings();
       await loadSecretGroupSettings();
       if (mounted) setState(() => _authError = null);
@@ -7268,7 +7293,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   Stream<DocumentSnapshot<Map<String, dynamic>>>? get _contactPresenceStream {
     if (!firebaseReady || widget.contactUid == null) return null;
     return FirebaseFirestore.instance
-        .collection('users')
+      .collection('publicProfiles')
         .doc(widget.contactUid)
         .snapshots();
   }
