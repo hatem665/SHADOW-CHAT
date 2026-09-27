@@ -19,8 +19,13 @@ exports.notifyNewMessage = onDocumentCreated(
     }
 
     const chatId = event.params.chatId;
-    if (chatId === 'secret_group' || chatId === 'secret_room') {
-      const members = await db.collection('rooms').doc(chatId)
+    const membersRoomId = chatId.startsWith('secret_group_')
+      ? chatId
+      : chatId === 'shadow_ops' || chatId === 'secret_room'
+        ? 'secret_room'
+        : null;
+    if (membersRoomId) {
+      const members = await db.collection('rooms').doc(membersRoomId)
         .collection('members').get();
       for (const member of members.docs) {
         if (member.id !== message.uid) {

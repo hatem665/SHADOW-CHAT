@@ -24,18 +24,28 @@ service cloud.firestore {
     }
 
     function isSecretChat(chatId) {
-      return chatId == 'secret_group' || chatId == 'shadow_ops';
+      return chatId == 'secret_group'
+        || chatId.matches('^secret_group_.+$')
+        || chatId == 'shadow_ops';
     }
 
     function secretRoomId(chatId) {
       return chatId == 'shadow_ops' ? 'secret_room' : 'secret_group';
     }
 
+    function isPrivateSecretGroup(roomId) {
+      return roomId.matches('^secret_group_.+$');
+    }
+
+    function isPrivateSecretGroupOwner(roomId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/rooms/$(roomId)).data.ownerUid == request.auth.uid;
+    }
+
     function canAccessSecretChat(chatId) {
-      return isSecretChat(chatId)
-        && ((chatId == 'secret_group' && signedIn())
-          || (chatId == 'shadow_ops'
-            && (isOwner() || isRoomMember(secretRoomId(chatId)))));
+      return (isPrivateSecretGroup(chatId) && isRoomMember(chatId))
+        || (chatId == 'shadow_ops'
+          && (isOwner() || isRoomMember(secretRoomId(chatId))));
     }
 
     function hasAcceptedContact(otherUserId) {
@@ -120,6 +130,17 @@ service cloud.firestore {
       allow read, write: if isSelf(userId);
     }
 
+    match /users/{userId}/secretGroups/{groupId} {
+      allow read: if isSelf(userId);
+      allow create, update: if isSelf(userId)
+        || (isPrivateSecretGroup(groupId)
+          && isRoomMember(groupId)
+          && isMember(groupId, userId)
+          && request.resource.data.roomId == groupId);
+      allow delete: if isSelf(userId)
+        || isPrivateSecretGroupOwner(groupId);
+    }
+
     match /users/{userId}/roomContacts/{contactId} {
       allow read, write: if isSelf(userId);
     }
@@ -182,25 +203,42 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /rooms/{roomId} {
+      allow read: if isPrivateSecretGroup(roomId)
+        && (isRoomMember(roomId)
+          || (signedIn() && resource.data.ownerUid == request.auth.uid));
+      allow create: if isPrivateSecretGroup(roomId)
+        && signedIn()
+        && roomId == 'secret_group_' + request.auth.uid
+        && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if isPrivateSecretGroup(roomId)
+        && signedIn()
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if false;
+    }
+
     match /rooms/{roomId}/members/{memberId} {
-      allow read: if (roomId == 'secret_group' && signedIn())
-        || isRoomMember(roomId)
-        || isOwner();
-      allow create: if (signedIn()
-          && request.resource.data.addedBy == request.auth.uid
-          && roomId == 'secret_group')
-        || (signedIn()
-          && request.resource.data.addedBy == request.auth.uid
-          && isOwner()
-          && roomId == 'secret_room');
-      allow update: if (roomId == 'secret_group'
-          && signedIn()
+      allow read: if (isPrivateSecretGroup(roomId)
+          && (isRoomMember(roomId) || isPrivateSecretGroupOwner(roomId)))
+        || (roomId == 'secret_room' && (isRoomMember(roomId) || isOwner()));
+      allow create: if (isPrivateSecretGroup(roomId)
+          && (isPrivateSecretGroupOwner(roomId) || isRoomMember(roomId))
           && request.resource.data.addedBy == request.auth.uid)
+        || (roomId == 'secret_room'
+          && signedIn()
+          && request.resource.data.addedBy == request.auth.uid
+          && isOwner());
+      allow update: if (isPrivateSecretGroup(roomId)
+          && isRoomMember(roomId)
+          && request.resource.data.addedBy == resource.data.addedBy)
         || (roomId == 'secret_room'
           && isOwner()
           && request.resource.data.addedBy == resource.data.addedBy);
-      allow delete: if isOwner()
-        || (roomId == 'secret_group' && isRoomMember(roomId))
+      allow delete: if (isPrivateSecretGroup(roomId)
+          && (isPrivateSecretGroupOwner(roomId)
+            || (signedIn() && request.auth.uid == memberId)))
+        || (roomId == 'secret_room' && isOwner())
         || (signedIn() && request.auth.uid == memberId);
     }
 

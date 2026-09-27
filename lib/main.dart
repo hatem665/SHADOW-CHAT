@@ -26,8 +26,6 @@ import 'dart:io';
 
 // متغير عام يتحكم في حالة حركة الحوت في كل التطبيق
 final ValueNotifier<bool> whaleMotionNotifier = ValueNotifier<bool>(true);
-
-// متغير عام يتحكم في تفعيل أو إيقاف صوت الحوت من الإعدادات
 final ValueNotifier<bool> whaleSoundNotifier = ValueNotifier<bool>(true);
 final ValueNotifier<bool> messageSoundNotifier = ValueNotifier<bool>(true);
 
@@ -175,19 +173,48 @@ Future<void> showChatNotification({
     title,
     body,
     details,
-  );
-}
-
-void showGenericFailureSnackBar(
-  BuildContext context, {
-  String message = 'حدثت مشكلة، حاول مرة أخرى',
-}) {
-  if (!context.mounted) return;
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text(message),
-      behavior: SnackBarBehavior.floating,
+        await FirebaseFirestore.instance
+            .collection('rooms')
+            .doc(roomId)
+            .collection('members')
+            .doc(targetUid)
+            .set({
+              'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
+              'addedBy': user.uid,
+              'addedAt': FieldValue.serverTimestamp(),
+            });
       duration: const Duration(seconds: 2),
+      } else {
+        final firestore = FirebaseFirestore.instance;
+        final roomSnapshot = await firestore.collection('rooms').doc(roomId).get();
+        if (!roomSnapshot.exists) {
+          throw StateError('المجموعة الخاصة غير موجودة');
+        }
+        final memberRef = firestore
+            .collection('rooms')
+            .doc(roomId)
+            .collection('members')
+            .doc(targetUid);
+        final memberSnapshot = await memberRef.get();
+        if (!memberSnapshot.exists) {
+          await memberRef.set({
+            'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
+            'addedBy': user.uid,
+            'addedAt': FieldValue.serverTimestamp(),
+          });
+        }
+        final roomData = roomSnapshot.data() ?? {};
+        await firestore
+            .collection('users')
+            .doc(targetUid)
+            .collection('secretGroups')
+            .doc(roomId)
+            .set({
+              'roomId': roomId,
+              'ownerUid': roomData['ownerUid'],
+              'title': roomData['title'] ?? 'مجموعة سرية',
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
     ),
   );
 }
@@ -670,7 +697,10 @@ Future<DateTime> ensureSecretAccessStart(String roomId) async {
   if (!firebaseReady) return fallback;
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) return fallback;
-  final key = roomId == 'secret_group'
+  final isPrivateGroup = roomId.startsWith('secret_group_');
+  final key = isPrivateGroup
+      ? 'secretGroupAccess_$roomId'
+      : roomId == 'secret_group'
       ? 'secretGroupAccess'
       : 'secretRoomAccess';
   final reference = FirebaseFirestore.instance
@@ -681,10 +711,27 @@ Future<DateTime> ensureSecretAccessStart(String roomId) async {
   try {
     final snapshot = await reference.get();
     final value = snapshot.data()?['startedAt'];
-    if (value is Timestamp) return value.toDate();
+    Timestamp? memberAddedAt;
+    if (isPrivateGroup) {
+      final membership = await FirebaseFirestore.instance
+          .collection('rooms')
+          .doc(roomId)
+          .collection('members')
+          .doc(user.uid)
+          .get();
+      final addedAt = membership.data()?['addedAt'];
+      if (addedAt is Timestamp) memberAddedAt = addedAt;
+    }
+    if (value is Timestamp &&
+        (memberAddedAt == null ||
+            !memberAddedAt.toDate().isAfter(value.toDate()))) {
+      return value.toDate();
+    }
+    final startedAt = memberAddedAt?.toDate() ?? fallback;
     await reference.set({
-      'startedAt': Timestamp.fromDate(fallback),
+      'startedAt': Timestamp.fromDate(startedAt),
     }, SetOptions(merge: true));
+    return startedAt;
   } catch (error) {
     debugPrint('Secret access start load error: $error');
   }
@@ -2671,7 +2718,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => const SecretChatScreen(),
+                          builder: (context) => const SecretGroupsScreen(),
                         ),
                       );
                     }
@@ -2723,14 +2770,151 @@ String contactsCollectionName(ContactScope scope) {
   }
 }
 
+String secretGroupRoomId(String ownerUid) => 'secret_group_$ownerUid';
+
+Future<String?> ensurePersonalSecretGroup() async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (!firebaseReady || user == null) return null;
+
+  final firestore = FirebaseFirestore.instance;
+  final roomId = secretGroupRoomId(user.uid);
+  final profileName = user.displayName?.trim();
+  final accountName = profileName == null || profileName.isEmpty
+      ? currentPublicUserId ?? 'مستخدم ${user.uid.substring(0, 6).toUpperCase()}'
+      : profileName;
+  final groupTitle = 'مجموعة $accountName';
+  final roomRef = firestore.collection('rooms').doc(roomId);
+  await roomRef.set({
+    'ownerUid': user.uid,
+    'title': groupTitle,
+    'updatedAt': FieldValue.serverTimestamp(),
+  }, SetOptions(merge: true));
+  final ownerMembership = roomRef.collection('members').doc(user.uid);
+  if (!(await ownerMembership.get()).exists) {
+    await ownerMembership.set({
+      'displayName': accountName,
+      'addedBy': user.uid,
+      'role': 'owner',
+      'addedAt': FieldValue.serverTimestamp(),
+    });
+  }
+  await firestore
+      .collection('users')
+      .doc(user.uid)
+      .collection('secretGroups')
+      .doc(roomId)
+      .set({
+        'roomId': roomId,
+        'ownerUid': user.uid,
+        'title': groupTitle,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+  return roomId;
+}
+
+class SecretGroupsScreen extends StatefulWidget {
+  const SecretGroupsScreen({super.key});
+
+  @override
+  State<SecretGroupsScreen> createState() => _SecretGroupsScreenState();
+}
+
+class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_prepareGroups());
+  }
+
+  Future<void> _prepareGroups() async {
+    try {
+      await ensurePersonalSecretGroup();
+    } catch (error) {
+      debugPrint('Secret groups preparation failed: $error');
+      _error = 'تعذر تحميل مجموعاتك الآن';
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('مجموعاتي السرية')),
+        body: user == null || !firebaseReady
+            ? const Center(child: Text('يلزم الاتصال بالتطبيق أولًا'))
+            : _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _error != null
+            ? Center(child: Text(_error!))
+            : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(user.uid)
+                    .collection('secretGroups')
+                    .orderBy('updatedAt', descending: true)
+                    .snapshots(),
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) {
+                    return const Center(child: Text('تعذر تحميل المجموعات'));
+                  }
+                  if (!snapshot.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final groups = snapshot.data!.docs;
+                  if (groups.isEmpty) {
+                    return const Center(child: Text('لا توجد مجموعات بعد'));
+                  }
+                  return ListView.separated(
+                    itemCount: groups.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final group = groups[index];
+                      final data = group.data();
+                      final roomId = data['roomId'] as String? ?? group.id;
+                      final title = data['title'] as String? ?? 'مجموعة سرية';
+                      final isOwner = data['ownerUid'] == user.uid;
+                      return ListTile(
+                        leading: const CircleAvatar(
+                          child: Icon(Icons.groups_rounded),
+                        ),
+                        title: Text(title),
+                        subtitle: Text(isOwner ? 'مجموعتك' : 'مجموعة تمت دعوتك إليها'),
+                        trailing: const Icon(Icons.chevron_left),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => SecretChatScreen(
+                              groupId: roomId,
+                              chatTitle: title,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+      ),
+    );
+  }
+}
+
 class ContactsScreen extends StatefulWidget {
   final ContactScope scope;
   final bool ownerVerified;
+  final String? roomId;
 
   const ContactsScreen({
     super.key,
     this.scope = ContactScope.regular,
     this.ownerVerified = false,
+    this.roomId,
   });
 
   @override
@@ -2851,10 +3035,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
       'createdAt': FieldValue.serverTimestamp(),
     };
 
+    final groupId = widget.scope == ContactScope.group
+        ? widget.roomId ?? secretGroupRoomId(user.uid)
+        : null;
     if (widget.scope != ContactScope.regular) {
-      final roomId = widget.scope == ContactScope.group
-          ? 'secret_group'
-          : 'secret_room';
+      final roomId = groupId ?? 'secret_room';
       if (widget.scope == ContactScope.room) {
         final memberCount = await countRoomMembers(roomId);
         if (isSecretRoomAtCapacity(memberCount)) {
@@ -2868,28 +3053,61 @@ class _ContactsScreenState extends State<ContactsScreen> {
           }
           return;
         }
-      }
-      await FirebaseFirestore.instance
-          .collection('rooms')
-          .doc(roomId)
-          .collection('members')
-          .doc(targetUid)
-          .set({
+        await FirebaseFirestore.instance
+            .collection('rooms')
+            .doc(roomId)
+            .collection('members')
+            .doc(targetUid)
+            .set({
+              'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
+              'addedBy': user.uid,
+              'addedAt': FieldValue.serverTimestamp(),
+            });
+        await refreshSecretRoomMemberNotifier();
+      } else {
+        final firestore = FirebaseFirestore.instance;
+        final roomSnapshot = await firestore.collection('rooms').doc(roomId).get();
+        if (!roomSnapshot.exists) {
+          throw StateError('المجموعة الخاصة غير موجودة');
+        }
+        final memberRef = firestore
+            .collection('rooms')
+            .doc(roomId)
+            .collection('members')
+            .doc(targetUid);
+        final memberSnapshot = await memberRef.get();
+        if (!memberSnapshot.exists) {
+          await memberRef.set({
             'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
             'addedBy': user.uid,
             'addedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-      if (widget.scope == ContactScope.room) {
-        await refreshSecretRoomMemberNotifier();
+          });
+        }
+        final roomData = roomSnapshot.data() ?? {};
+        await firestore
+            .collection('users')
+            .doc(targetUid)
+            .collection('secretGroups')
+            .doc(roomId)
+            .set({
+              'roomId': roomId,
+              'ownerUid': roomData['ownerUid'],
+              'title': roomData['title'] ?? 'مجموعة سرية',
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
       }
     }
 
+    final contactEntryId = groupId == null ? targetUid : '${groupId}_$targetUid';
     await FirebaseFirestore.instance
         .collection('users')
         .doc(user.uid)
         .collection(contactsCollectionName(widget.scope))
-        .doc(targetUid)
-        .set(contactData, SetOptions(merge: true));
+        .doc(contactEntryId)
+        .set({
+          ...contactData,
+          if (groupId != null) 'roomId': groupId,
+        }, SetOptions(merge: true));
   }
 
   String _regularContactDecision({
@@ -3528,7 +3746,15 @@ class _ContactsScreenState extends State<ContactsScreen> {
                               style: TextStyle(color: Colors.white70),
                             ),
                           );
-                        final docs = snapshot.data?.docs ?? [];
+                        final allDocs = snapshot.data?.docs ?? [];
+                        final docs = widget.scope == ContactScope.group
+                          ? allDocs
+                            .where((doc) =>
+                              doc.data()['roomId'] ==
+                              (widget.roomId ??
+                                secretGroupRoomId(user.uid)))
+                            .toList()
+                          : allDocs;
                         if (docs.isEmpty)
                           return const Center(
                             child: Text(
@@ -3575,7 +3801,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
                                         return const BlackRoomScreen();
                                       }
                                       if (widget.scope == ContactScope.group) {
-                                        return const SecretChatScreen();
+                                        return SecretChatScreen(
+                                          groupId: widget.roomId ??
+                                              secretGroupRoomId(
+                                                FirebaseAuth.instance.currentUser!.uid,
+                                              ),
+                                        );
                                       }
                                       return ChatScreen(
                                         chatName:
@@ -4179,9 +4410,10 @@ class SecretMembersScreen extends StatefulWidget {
 class _SecretMembersScreenState extends State<SecretMembersScreen> {
   DateTime? _accessStartedAt;
   bool _ownerVerifiedForRoom = false;
+  bool _isGroupOwner = false;
 
   bool get _isSecretRoom => widget.roomId == 'secret_room';
-  bool get _isSecretGroup => widget.roomId == 'secret_group';
+  bool get _isSecretGroup => widget.roomId.startsWith('secret_group_');
 
   Future<void> _verifyRoomOwnerForRemoval() async {
     if (!_isSecretRoom) return;
@@ -4281,6 +4513,15 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
           .doc(memberId)
           .delete();
 
+      if (_isSecretGroup) {
+          await FirebaseFirestore.instance
+            .collection('users')
+            .doc(memberId)
+            .collection('secretGroups')
+            .doc(widget.roomId)
+            .delete();
+      }
+
       if (_isSecretRoom) {
         await refreshSecretRoomMemberNotifier();
       }
@@ -4310,6 +4551,23 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
   void initState() {
     super.initState();
     unawaited(_loadAccessStart());
+    if (_isSecretGroup) unawaited(_loadGroupOwner());
+  }
+
+  Future<void> _loadGroupOwner() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      final group = await FirebaseFirestore.instance
+          .collection('rooms')
+          .doc(widget.roomId)
+          .get();
+      if (mounted) {
+        setState(() => _isGroupOwner = group.data()?['ownerUid'] == user.uid);
+      }
+    } catch (error) {
+      debugPrint('Private group owner load failed: $error');
+    }
   }
 
   Future<void> _loadAccessStart() async {
@@ -4432,11 +4690,14 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
                         final memberId = visibleMembers[index].id;
                         final memberName =
                             visibleMembers[index].data()['displayName'] ?? 'مجهول الهوية';
-                        final bool canRemoveMember = canRemoveSecretMember(
-                          isGroup: _isSecretGroup,
-                          ownerVerified: _ownerVerifiedForRoom,
-                          isOwnerUser: _ownerVerifiedForRoom,
-                        ) && memberId != currentUid;
+                        final canRemoveMember = memberId != currentUid &&
+                            (_isSecretGroup
+                                ? _isGroupOwner
+                                : canRemoveSecretMember(
+                                    isGroup: false,
+                                    ownerVerified: _ownerVerifiedForRoom,
+                                    isOwnerUser: _ownerVerifiedForRoom,
+                                  ));
 
                         if (!canRemoveMember) {
                           return null;
@@ -4463,11 +4724,13 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
 class SecretChatScreen extends StatefulWidget {
   final bool? requirePassword;
   final String chatTitle;
+  final String? groupId;
 
   const SecretChatScreen({
     super.key,
     this.requirePassword,
     this.chatTitle = 'المجموعة السرية الآمنة',
+    this.groupId,
   });
 
   @override
@@ -4491,6 +4754,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
   bool _isUnlocked = false;
   bool _requiresPassword = false;
   bool _isSecretMember = false;
+  bool _isGroupOwner = false;
   String? _groupPasswordHash;
   DateTime? _accessStartedAt;
   final TextEditingController _passController = TextEditingController();
@@ -4526,31 +4790,27 @@ class _SecretChatScreenState extends State<SecretChatScreen>
   }
 
   Future<void> _prepareSecretChat() async {
-    final roomId = widget.chatTitle.contains('الغرفة السوداء')
-        ? 'secret_room'
-        : 'secret_group';
-    if (roomId == 'secret_group') {
-      _accessStartedAt = null;
-      await Future.wait([
-        _loadSecretMembership(),
-        _loadGroupPassword(),
-      ]);
-    } else {
-      _accessStartedAt = await ensureSecretAccessStart(roomId);
-      await _loadSecretMembership();
-      await _loadGroupPassword();
+    if (!_isBlackRoom && _roomId == secretGroupRoomId(
+      FirebaseAuth.instance.currentUser?.uid ?? '',
+    )) {
+      await ensurePersonalSecretGroup();
     }
+    final roomId = _roomId;
+    _accessStartedAt = await ensureSecretAccessStart(roomId);
+    await Future.wait([
+      _loadSecretMembership(),
+      _loadGroupPassword(),
+    ]);
     _listenToSecretMessages();
   }
 
   Future<void> _sendSecretMessage() async {
     final String text = _messageController.text.trim();
     if (text.isNotEmpty) {
-      final needsMembership = widget.chatTitle.contains('الغرفة السوداء');
-      if (needsMembership && !_isSecretMember) {
+      if (!_isSecretMember) {
         await _loadSecretMembership();
       }
-      if (needsMembership && !_isSecretMember) {
+      if (!_isSecretMember) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -4593,9 +4853,26 @@ class _SecretChatScreenState extends State<SecretChatScreen>
     }
   }
 
-  String get _secretChatId => widget.chatTitle.contains('الغرفة السوداء')
-      ? 'shadow_ops'
-      : 'secret_group';
+  bool get _isBlackRoom => widget.chatTitle.contains('الغرفة السوداء');
+
+  String get _roomId => _isBlackRoom
+      ? 'secret_room'
+      : widget.groupId ??
+          secretGroupRoomId(FirebaseAuth.instance.currentUser?.uid ?? '');
+
+  String get _secretChatId => _isBlackRoom ? 'shadow_ops' : _roomId;
+  bool get _isOwnPrivateGroup {
+    final user = FirebaseAuth.instance.currentUser;
+    return !_isBlackRoom &&
+        user != null &&
+        _roomId == secretGroupRoomId(user.uid);
+  }
+
+  String get _senderName {
+    final displayName = FirebaseAuth.instance.currentUser?.displayName?.trim();
+    if (displayName != null && displayName.isNotEmpty) return displayName;
+    return currentPublicUserId ?? 'مستخدم';
+  }
 
   Future<void> _loadSecretMembership() async {
     if (!firebaseReady) return;
@@ -4606,25 +4883,10 @@ class _SecretChatScreenState extends State<SecretChatScreen>
     }
 
     try {
-      final roomId = widget.chatTitle.contains('الغرفة السوداء')
-          ? 'secret_room'
-          : 'secret_group';
-      if (roomId == 'secret_group') {
-        final membershipRef = FirebaseFirestore.instance
-            .collection('rooms')
-            .doc(roomId)
-            .collection('members')
-            .doc(user.uid);
-        final membership = await membershipRef.get();
-        if (!membership.exists) {
-          await membershipRef.set({
-            'displayName': user.displayName ?? 'مستخدم',
-            'addedBy': user.uid,
-            'addedAt': FieldValue.serverTimestamp(),
-          });
-        }
-        if (mounted) setState(() => _isSecretMember = true);
-        return;
+      final roomId = _roomId;
+      if (roomId.startsWith('secret_group_') &&
+          roomId == secretGroupRoomId(user.uid)) {
+        await ensurePersonalSecretGroup();
       }
       final membership = await FirebaseFirestore.instance
           .collection('rooms')
@@ -4632,13 +4894,30 @@ class _SecretChatScreenState extends State<SecretChatScreen>
           .collection('members')
           .doc(user.uid)
           .get();
+      if (roomId.startsWith('secret_group_')) {
+        final group = await FirebaseFirestore.instance
+            .collection('rooms')
+            .doc(roomId)
+            .get();
+        final isOwner = group.data()?['ownerUid'] == user.uid;
+        if (mounted) {
+          setState(() {
+            _isSecretMember = membership.exists || isOwner;
+            _isGroupOwner = isOwner;
+          });
+        }
+        return;
+      }
       final ownerSnapshot = await FirebaseFirestore.instance
           .collection('config')
           .doc('app')
           .get();
       final isOwner = ownerSnapshot.data()?['ownerUid'] == user.uid;
       if (mounted) {
-        setState(() => _isSecretMember = membership.exists || isOwner);
+        setState(() {
+          _isSecretMember = membership.exists || isOwner;
+          _isGroupOwner = false;
+        });
       }
     } catch (error) {
       debugPrint('Secret membership load error: $error');
@@ -4649,6 +4928,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
   Future<void> _leaveSecretChat() async {
     final user = FirebaseAuth.instance.currentUser;
     if (!firebaseReady || user == null) return;
+    if (_isGroupOwner || _isOwnPrivateGroup) return;
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -4676,9 +4956,8 @@ class _SecretChatScreenState extends State<SecretChatScreen>
     );
     if (confirmed != true) return;
 
-    final roomId = widget.chatTitle.contains('الغرفة السوداء')
-        ? 'secret_room'
-        : 'secret_group';
+    final roomId = _roomId;
+    final isPrivateGroup = roomId.startsWith('secret_group_');
     try {
       await FirebaseFirestore.instance
           .collection('rooms')
@@ -4691,13 +4970,27 @@ class _SecretChatScreenState extends State<SecretChatScreen>
           .doc(user.uid)
           .collection(
             contactsCollectionName(
-              roomId == 'secret_group'
+              isPrivateGroup
                   ? ContactScope.group
                   : ContactScope.room,
             ),
           )
           .doc(user.uid)
           .delete();
+      if (isPrivateGroup) {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .collection('secretGroups')
+            .doc(roomId)
+            .delete();
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .collection('settings')
+            .doc('secretGroupAccess_$roomId')
+            .delete();
+      }
 
       await _secretMessagesSubscription?.cancel();
       _secretMessagesSubscription = null;
@@ -4749,7 +5042,6 @@ class _SecretChatScreenState extends State<SecretChatScreen>
               }
               final timestamp = data['createdAt'];
               if (accessStartedAt != null &&
-                  data['uid'] != currentUid &&
                   timestamp is Timestamp &&
                   timestamp.toDate().isBefore(accessStartedAt)) {
                 return null;
@@ -4903,7 +5195,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
           .doc(_secretChatId)
           .collection('messages')
           .add({
-            'sender': 'أنت',
+            'sender': _senderName,
             'text': text,
             'uid': user.uid,
             'deletedFor': <String>[],
@@ -5029,7 +5321,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
           .doc(_secretChatId)
           .collection('messages')
           .add({
-            'sender': 'أنت',
+            'sender': _senderName,
             'text': text,
             'uid': user?.uid,
             'deletedFor': <String>[],
@@ -5193,7 +5485,9 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                       .orderBy('createdAt')
                       .snapshots(),
             builder: (context, snapshot) {
-              final contacts = snapshot.data?.docs ?? [];
+                final contacts = (snapshot.data?.docs ?? [])
+                  .where((contact) => contact.data()['roomId'] == _roomId)
+                  .toList();
               return AlertDialog(
                 backgroundColor: const Color(0xFF101B18),
                 title: const Text(
@@ -5226,16 +5520,39 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                                 style: const TextStyle(color: Colors.white54),
                               ),
                               onTap: () async {
-                                await FirebaseFirestore.instance
+                                final roomId = _roomId;
+                                final firestore = FirebaseFirestore.instance;
+                                final targetUid = data['uid'] as String? ??
+                                  contacts[index].id;
+                                final memberRef = firestore
                                     .collection('rooms')
-                                    .doc('secret_group')
+                                    .doc(roomId)
                                     .collection('members')
-                                    .doc(contacts[index].id)
+                                  .doc(targetUid);
+                                if (!(await memberRef.get()).exists) {
+                                  await memberRef.set({
+                                    'displayName':
+                                        data['displayName'] ?? 'جهة اتصال',
+                                    'addedBy': owner.uid,
+                                    'addedAt': FieldValue.serverTimestamp(),
+                                  });
+                                }
+                                final group = await firestore
+                                    .collection('rooms')
+                                    .doc(roomId)
+                                    .get();
+                                await firestore
+                                    .collection('users')
+                                    .doc(targetUid)
+                                    .collection('secretGroups')
+                                    .doc(roomId)
                                     .set({
-                                      'displayName':
-                                          data['displayName'] ?? 'جهة اتصال',
-                                      'addedBy': owner?.uid,
-                                      'addedAt': FieldValue.serverTimestamp(),
+                                      'roomId': roomId,
+                                      'ownerUid': group.data()?['ownerUid'],
+                                      'title': group.data()?['title'] ??
+                                          'مجموعة سرية',
+                                      'updatedAt':
+                                          FieldValue.serverTimestamp(),
                                     });
                                 if (dialogContext.mounted)
                                   Navigator.pop(dialogContext);
@@ -5505,7 +5822,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                   context,
                   MaterialPageRoute(
                     builder: (_) => SecretMembersScreen(
-                      roomId: isBlackRoom ? 'secret_room' : 'secret_group',
+                      roomId: isBlackRoom ? 'secret_room' : _roomId,
                       title: isBlackRoom ? 'أعضاء الغرفة' : 'أعضاء المجموعة',
                     ),
                   ),
@@ -5524,16 +5841,20 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                     context,
                     MaterialPageRoute(
                       builder: (context) =>
-                          const ContactsScreen(scope: ContactScope.group),
+                          ContactsScreen(
+                            scope: ContactScope.group,
+                            roomId: _roomId,
+                          ),
                     ),
                   );
                 },
               ),
-            IconButton(
-              icon: const Icon(Icons.logout, color: Colors.redAccent),
-              tooltip: 'الخروج من المحادثة',
-              onPressed: _leaveSecretChat,
-            ),
+            if (!_isGroupOwner && !_isOwnPrivateGroup)
+              IconButton(
+                icon: const Icon(Icons.logout, color: Colors.redAccent),
+                tooltip: 'الخروج من المحادثة',
+                onPressed: _leaveSecretChat,
+              ),
           ],
         ),
         body: Container(
@@ -7698,16 +8019,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           .doc(_chatId);
       await chatRef.set({
         'participantA': widget.contactUid == null
-          ? user.uid
-          : ([user.uid, widget.contactUid!]..sort())[0],
+            ? user.uid
+            : ([user.uid, widget.contactUid!]..sort())[0],
         'participantB': widget.contactUid == null
-          ? user.uid
-          : ([user.uid, widget.contactUid!]..sort())[1],
+            ? user.uid
+            : ([user.uid, widget.contactUid!]..sort())[1],
         'participants':
             widget.contactUid == null
-                  ? [user.uid]
-                  : [user.uid, widget.contactUid].toList()
-              ..sort(),
+                    ? [user.uid]
+                    : [user.uid, widget.contactUid].toList()
+                ..sort(),
         'chatType': widget.contactUid == null ? 'group' : 'direct',
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
