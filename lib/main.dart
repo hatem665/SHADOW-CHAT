@@ -1194,23 +1194,7 @@ Future<void> initializeFirebase() async {
     }
 
     firebaseReady = true;
-    await initializeLocalNotifications();
-    if (FirebaseAuth.instance.currentUser != null) {
-      try {
-        await ensureUserProfile();
-        await setupPushNotifications();
-        final privacySettings = await loadPrivacySettings();
-        if (privacySettings['messageSound'] is bool) {
-          messageSoundNotifier.value = privacySettings['messageSound'] as bool;
-        }
-      } catch (error) {
-        debugPrint('User profile setup failed: $error');
-      }
-      await loadAppLockSettings();
-      await loadSecretGroupSettings();
-      await loadRoomOwnerKey();
-      await loadSecretRoomCode();
-    }
+    unawaited(initializeLocalNotifications());
   } catch (error) {
     firebaseFailureMessage = error.toString();
     debugPrint('Firebase initialization failed: $error');
@@ -1502,11 +1486,6 @@ class _AuthGateState extends State<AuthGate> {
 
     try {
       await FirebaseAuth.instance.signInAnonymously();
-      await ensureUserProfile();
-      await loadPrivacySettings();
-      await loadRoomOwnerKey();
-      await loadSecretRoomCode();
-      await setupPushNotifications();
       if (mounted) setState(() => _authError = null);
     } catch (error) {
       debugPrint('Anonymous login failed: $error');
@@ -1523,11 +1502,14 @@ class _AuthGateState extends State<AuthGate> {
     if (_sessionPrepared || _preparingSession) return;
     _preparingSession = true;
     try {
-      await ensureUserProfile();
-      await setupPushNotifications();
-      await loadPrivacySettings();
-      await loadAppLockSettings();
-      await loadSecretGroupSettings();
+      await Future.wait([
+        loadPrivacySettings(),
+        loadAppLockSettings(),
+      ]);
+      unawaited(ensureUserProfile());
+      unawaited(setupPushNotifications());
+      unawaited(loadRoomOwnerKey());
+      unawaited(loadSecretRoomCode());
       if (mounted) setState(() => _authError = null);
     } catch (error) {
       debugPrint('Authenticated session setup failed: $error');
@@ -4331,6 +4313,7 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
   }
 
   Future<void> _loadAccessStart() async {
+    if (_isSecretGroup) return;
     final startedAt = await ensureSecretAccessStart(widget.roomId);
     if (mounted) {
       setState(() => _accessStartedAt = startedAt);
@@ -4380,7 +4363,6 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
                     .collection('rooms')
                     .doc(widget.roomId)
                     .collection('members')
-                    .orderBy('addedAt')
                     .snapshots(),
                 builder: (context, snapshot) {
                   if (snapshot.hasError) {
@@ -4400,6 +4382,7 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
                   }
                   final currentUid = FirebaseAuth.instance.currentUser?.uid;
                   final visibleMembers = snapshot.data!.docs.where((member) {
+                    if (_isSecretGroup) return true;
                     final addedAt = member.data()['addedAt'];
                     if (currentUid != null && member.id == currentUid) {
                       return true;
@@ -4546,19 +4529,28 @@ class _SecretChatScreenState extends State<SecretChatScreen>
     final roomId = widget.chatTitle.contains('الغرفة السوداء')
         ? 'secret_room'
         : 'secret_group';
-    _accessStartedAt = await ensureSecretAccessStart(roomId);
-    await _loadSecretMembership();
-    await _loadGroupPassword();
+    if (roomId == 'secret_group') {
+      _accessStartedAt = null;
+      await Future.wait([
+        _loadSecretMembership(),
+        _loadGroupPassword(),
+      ]);
+    } else {
+      _accessStartedAt = await ensureSecretAccessStart(roomId);
+      await _loadSecretMembership();
+      await _loadGroupPassword();
+    }
     _listenToSecretMessages();
   }
 
   Future<void> _sendSecretMessage() async {
     final String text = _messageController.text.trim();
     if (text.isNotEmpty) {
-      if (!_isSecretMember) {
+      final needsMembership = widget.chatTitle.contains('الغرفة السوداء');
+      if (needsMembership && !_isSecretMember) {
         await _loadSecretMembership();
       }
-      if (!_isSecretMember) {
+      if (needsMembership && !_isSecretMember) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -4617,6 +4609,23 @@ class _SecretChatScreenState extends State<SecretChatScreen>
       final roomId = widget.chatTitle.contains('الغرفة السوداء')
           ? 'secret_room'
           : 'secret_group';
+      if (roomId == 'secret_group') {
+        final membershipRef = FirebaseFirestore.instance
+            .collection('rooms')
+            .doc(roomId)
+            .collection('members')
+            .doc(user.uid);
+        final membership = await membershipRef.get();
+        if (!membership.exists) {
+          await membershipRef.set({
+            'displayName': user.displayName ?? 'مستخدم',
+            'addedBy': user.uid,
+            'addedAt': FieldValue.serverTimestamp(),
+          });
+        }
+        if (mounted) setState(() => _isSecretMember = true);
+        return;
+      }
       final membership = await FirebaseFirestore.instance
           .collection('rooms')
           .doc(roomId)

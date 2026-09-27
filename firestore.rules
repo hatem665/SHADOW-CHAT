@@ -33,7 +33,9 @@ service cloud.firestore {
 
     function canAccessSecretChat(chatId) {
       return isSecretChat(chatId)
-        && (isOwner() || isRoomMember(secretRoomId(chatId)));
+        && ((chatId == 'secret_group' && signedIn())
+          || (chatId == 'shadow_ops'
+            && (isOwner() || isRoomMember(secretRoomId(chatId)))));
     }
 
     function hasAcceptedContact(otherUserId) {
@@ -181,7 +183,9 @@ service cloud.firestore {
     }
 
     match /rooms/{roomId}/members/{memberId} {
-      allow read: if isRoomMember(roomId) || isOwner();
+      allow read: if (roomId == 'secret_group' && signedIn())
+        || isRoomMember(roomId)
+        || isOwner();
       allow create: if (signedIn()
           && request.resource.data.addedBy == request.auth.uid
           && roomId == 'secret_group')
