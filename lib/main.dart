@@ -338,49 +338,6 @@ Future<void> showChatNotification({
     title,
     body,
     details,
-        await FirebaseFirestore.instance
-            .collection('rooms')
-            .doc(roomId)
-            .collection('members')
-            .doc(targetUid)
-            .set({
-              'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
-              'addedBy': user.uid,
-              'addedAt': FieldValue.serverTimestamp(),
-            });
-      duration: const Duration(seconds: 2),
-      } else {
-        final firestore = FirebaseFirestore.instance;
-        final roomSnapshot = await firestore.collection('rooms').doc(roomId).get();
-        if (!roomSnapshot.exists) {
-          throw StateError('المجموعة الخاصة غير موجودة');
-        }
-        final memberRef = firestore
-            .collection('rooms')
-            .doc(roomId)
-            .collection('members')
-            .doc(targetUid);
-        final memberSnapshot = await memberRef.get();
-        if (!memberSnapshot.exists) {
-          await memberRef.set({
-            'displayName': displayName.isEmpty ? 'جهة اتصال' : displayName,
-            'addedBy': user.uid,
-            'addedAt': FieldValue.serverTimestamp(),
-          });
-        }
-        final roomData = roomSnapshot.data() ?? {};
-        await firestore
-            .collection('users')
-            .doc(targetUid)
-            .collection('secretGroups')
-            .doc(roomId)
-            .set({
-              'roomId': roomId,
-              'ownerUid': roomData['ownerUid'],
-              'title': roomData['title'] ?? 'مجموعة سرية',
-              'updatedAt': FieldValue.serverTimestamp(),
-            });
-    ),
   );
 }
 
@@ -1542,6 +1499,12 @@ String firebaseWriteFailureMessage(Object error) {
   }
   if (error is StateError) return error.message.toString();
   return 'تعذرت الإضافة في Firebase. تحقق من الاتصال وإعدادات المشروع.';
+}
+
+void showGenericFailureSnackBar(BuildContext context) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('حدث خطأ، حاول مرة أخرى')),
+  );
 }
 
 Future<void> addSecretRoomMember({
