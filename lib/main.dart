@@ -4508,14 +4508,30 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       },
                     ),
                   if (_canAddScopedContacts) ...[
+                    Align(
+                      alignment: Alignment.center,
+                      child: TextButton.icon(
+                        onPressed: () {
+                          _headerScrollController.animateTo(
+                            _headerScrollController.position.maxScrollExtent,
+                            duration: const Duration(milliseconds: 350),
+                            curve: Curves.easeOut,
+                          );
+                        },
+                        icon: const Icon(Icons.keyboard_arrow_down),
+                        label: const Text('كتابة المعرّف يدويًا'),
+                      ),
+                    ),
                     Container(
                       width: double.infinity,
-                      margin: const EdgeInsets.only(top: 12, bottom: 12),
+                      margin: const EdgeInsets.only(top: 8, bottom: 12),
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
                         color: const Color(0xFF0F1C1A),
                         borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white12),
+                        border: Border.all(
+                          color: const Color(0xFF38E8A5).withOpacity(0.35),
+                        ),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4594,20 +4610,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       ),
                     ),
                   ],
-                  Align(
-                    alignment: Alignment.center,
-                    child: TextButton.icon(
-                      onPressed: () {
-                        _headerScrollController.animateTo(
-                          _headerScrollController.position.maxScrollExtent,
-                          duration: const Duration(milliseconds: 350),
-                          curve: Curves.easeOut,
-                        );
-                      },
-                      icon: const Icon(Icons.keyboard_arrow_down),
-                      label: const Text('نزّل الصفحة لعرض المزيد'),
-                    ),
-                  ),
                 ],
                     ),
                   ),
