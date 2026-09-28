@@ -644,6 +644,25 @@ String sanitizeDisplayName(String value) {
   return trimmed.replaceAll(RegExp(r'\s+'), ' ');
 }
 
+bool hasUnknownContactDisplayName(Object? value) {
+  if (value is! String || value.trim().isEmpty) return true;
+  final normalizedName = value.trim().toLowerCase();
+  return normalizedName == 'غير معرف' ||
+      normalizedName == 'غير معروف' ||
+      normalizedName == 'unknown';
+}
+
+bool shouldRemoveUnknownContact(Map<String, dynamic> data) {
+  final status = data['status'];
+  if (status == 'pending' || status == 'incoming') return false;
+  return hasUnknownContactDisplayName(data['displayName']);
+}
+
+String resolveContactDisplayName(Object? value, {required String fallback}) {
+  if (hasUnknownContactDisplayName(value)) return fallback;
+  return sanitizeDisplayName(value as String);
+}
+
 Future<void> syncUserDisplayNameAcrossApp(String newName) async {
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) return;
@@ -2475,15 +2494,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
     ).then((_) => passwordController.dispose());
   }
 
-  bool _isUnknownContact(Map<String, dynamic> data) {
-    final name = data['displayName'];
-    if (name is! String || name.trim().isEmpty) return true;
-    final normalizedName = name.trim().toLowerCase();
-    return normalizedName == 'غير معرف' ||
-        normalizedName == 'غير معروف' ||
-        normalizedName == 'unknown';
-  }
-
   Future<void> _removeChatContact(String contactUid) async {
     final user = FirebaseAuth.instance.currentUser;
     if (!firebaseReady || user == null || contactUid.isEmpty) return;
@@ -2622,11 +2632,11 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
                         final contacts = (snapshot.data?.docs ??
                           <QueryDocumentSnapshot<Map<String, dynamic>>>[])
-                            .where((doc) => !_isUnknownContact(doc.data()))
+                            .where((doc) => !shouldRemoveUnknownContact(doc.data()))
                             .toList();
 
                         for (final doc in snapshot.data?.docs ?? []) {
-                          if (_isUnknownContact(doc.data())) {
+                          if (shouldRemoveUnknownContact(doc.data())) {
                             unawaited(_removeChatContact(doc.id));
                           }
                         }
@@ -2666,7 +2676,10 @@ class _ChatListScreenState extends State<ChatListScreen> {
                           itemCount: contacts.length,
                           itemBuilder: (context, index) {
                             final contactData = contacts[index].data();
-                            final contactName = contactData['displayName'] ?? 'مستخدم';
+                            final contactName = resolveContactDisplayName(
+                              contactData['displayName'],
+                              fallback: 'مستخدم',
+                            );
                             final lastMessage = contactData['lastMessage'] ?? 'لا توجد رسائل';
                             final contactUid = contacts[index].id;
                             final status = (contactData['status'] as String?) ?? 'pending';
@@ -4080,13 +4093,21 @@ class _ContactsScreenState extends State<ContactsScreen> {
       return;
     }
     if (_sendingRequestUids.contains(targetUid)) return;
+    final safeTargetName = resolveContactDisplayName(
+      displayName,
+      fallback: publicId,
+    );
+    final safeRequestSenderName = resolveContactDisplayName(
+      user.displayName,
+      fallback: 'مستخدم',
+    );
     setState(() => _sendingRequestUids.add(targetUid));
 
     try {
       if (widget.scope != ContactScope.regular) {
         await _saveContactRelationship(
           targetUid: targetUid,
-          displayName: displayName.isEmpty ? publicId : displayName,
+          displayName: safeTargetName,
           publicId: publicId,
           status: 'accepted',
         );
@@ -4095,7 +4116,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
               ? 'المجموعة'
               : 'الغرفة';
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('تمت إضافة $displayName إلى $sectionName')),
+            SnackBar(content: Text('تمت إضافة $safeTargetName إلى $sectionName')),
           );
           if (widget.scope == ContactScope.group && Navigator.of(context).canPop()) {
             Navigator.of(context).pop();
@@ -4124,7 +4145,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       if (action == 'accepted') {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('أنت بالفعل لديك صلاحية الدردشة مع $displayName')),
+            SnackBar(content: Text('أنت بالفعل لديك صلاحية الدردشة مع $safeTargetName')),
           );
         }
         return;
@@ -4132,7 +4153,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       if (action == 'pending') {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('طلب الإضافة إلى $displayName موجود بالفعل في الانتظار')),
+            SnackBar(content: Text('طلب الإضافة إلى $safeTargetName موجود بالفعل في الانتظار')),
           );
         }
         return;
@@ -4140,7 +4161,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       if (action == 'incoming') {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('هذا المستخدم أرسل لك طلب اتصال بالفعل')),
+            SnackBar(content: Text('لدى $safeTargetName طلب اتصال موجود بالفعل')),
           );
         }
         return;
@@ -4148,7 +4169,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
       await _saveContactRelationship(
         targetUid: targetUid,
-        displayName: displayName.isEmpty ? publicId : displayName,
+        displayName: safeTargetName,
         publicId: publicId,
         status: 'pending',
       );
@@ -4161,8 +4182,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
           .set({
             'contactId': user.uid,
             'uid': user.uid,
-            'displayName': user.displayName ?? 'مستخدم',
-            'name': user.displayName ?? 'مستخدم',
+            'displayName': safeRequestSenderName,
+            'name': safeRequestSenderName,
             'lastMessage': 'طلب اتصال جديد',
             'status': 'incoming',
             'updatedAt': FieldValue.serverTimestamp(),
@@ -4171,7 +4192,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('تم إرسال طلب الموافقة إلى $displayName')),
+          SnackBar(content: Text('تم إرسال طلب الموافقة إلى $safeTargetName')),
         );
       }
     } catch (error) {
@@ -4366,7 +4387,16 @@ class _ContactsScreenState extends State<ContactsScreen> {
                                           ),
                                         ),
                                         const SizedBox(height: 8),
-                                        ...appUsers.map((doc) {
+                                        SizedBox(
+                                          height: 240,
+                                          child: ListView.separated(
+                                            primary: false,
+                                            cacheExtent: 120,
+                                            itemCount: appUsers.length,
+                                            separatorBuilder: (_, __) =>
+                                                const SizedBox(height: 8),
+                                            itemBuilder: (context, index) {
+                                          final doc = appUsers[index];
                                           final data = doc.data();
                                           final publicId = (data['publicId'] as String?) ?? doc.id;
                                           final displayName = (data['displayName'] as String?) ?? 'مستخدم';
@@ -4464,7 +4494,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
                                               ],
                                             ),
                                           );
-                                        }),
+                                            },
+                                          ),
+                                        ),
                                       ],
                                     );
                                   },
@@ -7045,17 +7077,25 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                       child: TextField(
                         controller: _messageController,
                         style: const TextStyle(color: Colors.white),
+                        textDirection: TextDirection.rtl,
+                        textAlign: TextAlign.start,
                         minLines: 1,
                         maxLines: 4,
                         textInputAction: TextInputAction.newline,
                         decoration: InputDecoration(
                           contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 9,
+                            horizontal: 10,
+                            vertical: 11,
                           ),
-                          hintText: 'اكتب رسالتك السرية...',
-                          hintStyle: const TextStyle(color: Colors.white38),
+                          hintText: 'اكتب رسالتك السرية',
+                          hintStyle: TextStyle(
+                            color: const Color(0xFFEAF4F0).withOpacity(0.82),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
                           border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
                         ),
                         onSubmitted: (_) => _sendSecretMessage(),
                       ),
@@ -10135,38 +10175,20 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               : const Color(0xFFF4F7F6),
           body: Stack(
             children: [
-              if (isDark)
-                ValueListenableBuilder<bool>(
-                  valueListenable: whaleMotionNotifier,
-                  builder: (context, isMoving, child) {
-                    return AnimatedBuilder(
-                      animation: _whaleAnimation,
-                      child: Image.asset(
-                        'assets/images/whale.jpg',
-                        fit: BoxFit.cover,
-                        cacheWidth: 896,
-                        errorBuilder: (context, error, stackTrace) =>
-                            Container(color: const Color(0xFF101716)),
-                      ),
-                      builder: (context, child) {
-                        return Positioned.fill(
-                          child: RepaintBoundary(
-                            child: Transform.translate(
-                              offset: isMoving
-                                  ? Offset(0, _whaleAnimation.value)
-                                  : Offset.zero,
-                              child: Transform.scale(scale: 1.08, child: child),
-                            ),
-                          ),
-                        );
-                      },
-                    );
-                  },
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Color(0xFF101716),
+                        Color(0xFF0D1412),
+                      ],
+                    ),
+                  ),
                 ),
-              if (isDark)
-                Positioned.fill(
-                  child: Container(color: Colors.black.withOpacity(0.35)),
-                ),
+              ),
               SafeArea(
                 child: Column(
                   children: [
@@ -10323,6 +10345,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                           child: TextField(
                             controller: _controller,
                             style: const TextStyle(color: Colors.white),
+                            textDirection: TextDirection.rtl,
+                            textAlign: TextAlign.start,
                             minLines: 1,
                             maxLines: 4,
                             textInputAction: TextInputAction.newline,
@@ -10332,9 +10356,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                                 horizontal: 8,
                                 vertical: 9,
                               ),
-                              hintText:
-                                  'اكتب رسالتك هنا...',
-                              hintStyle: const TextStyle(color: Colors.white70),
+                              hintText: 'اكتب رسالتك هنا',
+                              hintStyle: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
                               border: InputBorder.none,
                             ),
                             onSubmitted: (_) => _sendMessage(),

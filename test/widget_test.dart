@@ -63,6 +63,25 @@ void main() {
     expect(sanitizeDisplayName(''), isEmpty);
   });
 
+  test('unknown contact cleanup preserves pending and incoming requests', () {
+    expect(
+      shouldRemoveUnknownContact({'status': 'pending', 'displayName': ''}),
+      isFalse,
+    );
+    expect(
+      shouldRemoveUnknownContact({'status': 'incoming', 'displayName': 'unknown'}),
+      isFalse,
+    );
+    expect(
+      shouldRemoveUnknownContact({'status': 'accepted', 'displayName': 'unknown'}),
+      isTrue,
+    );
+    expect(
+      resolveContactDisplayName('', fallback: 'مستخدم'),
+      'مستخدم',
+    );
+  });
+
   test('secret member removal policy allows group removal and owner-only room removal', () {
     expect(
       canRemoveSecretMember(
