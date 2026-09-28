@@ -916,10 +916,23 @@ Future<Map<String, dynamic>> loadPrivacySettings() async {
         .doc('privacy')
         .get();
     final data = snapshot.data() ?? {};
-    chatHistoryClearedAtNotifier.value =
-      data['historyClearedAt'] is Timestamp
+    final localPreferences = await getSafeSharedPreferences();
+    final localClearedAt = localPreferences
+      ?.getString('local_history_cleared_at');
+    final localClearedDate = localClearedAt == null
+      ? null
+      : DateTime.tryParse(localClearedAt);
+    final remoteClearedAt = data['historyClearedAt'] is Timestamp
       ? data['historyClearedAt'] as Timestamp
       : null;
+    final localTimestamp = localClearedDate == null
+      ? null
+      : Timestamp.fromDate(localClearedDate);
+    chatHistoryClearedAtNotifier.value = remoteClearedAt == null ||
+        (localTimestamp != null &&
+          localTimestamp.compareTo(remoteClearedAt) > 0)
+      ? localTimestamp ?? remoteClearedAt
+      : remoteClearedAt;
     if (data['ghostMode'] is bool) {
       final ghostMode = data['ghostMode'] as bool;
       ghostModeNotifier.value = ghostMode;
@@ -970,18 +983,65 @@ Future<void> deleteOwnChatMessages(String chatId) async {
 }
 
 Future<void> deleteAllChatHistoryForUser() async {
-  if (!firebaseReady) return;
-  final user = FirebaseAuth.instance.currentUser;
-  if (user == null) return;
+  final preferences = await getSafeSharedPreferences();
+  final paths = <String>{};
 
-  final clearedAt = Timestamp.now();
-  await FirebaseFirestore.instance
-      .collection('users')
-      .doc(user.uid)
-      .collection('settings')
-      .doc('privacy')
-      .set({'historyClearedAt': clearedAt}, SetOptions(merge: true));
-  chatHistoryClearedAtNotifier.value = clearedAt;
+  if (preferences != null) {
+    for (final key in preferences.getKeys()) {
+      if (!key.startsWith('local_voice_messages_') &&
+          !key.startsWith('local_secret_voice_messages_')) {
+        continue;
+      }
+      final encoded = preferences.getString(key);
+      if (encoded == null || encoded.isEmpty) continue;
+      try {
+        final messages = jsonDecode(encoded);
+        if (messages is List) {
+          for (final message in messages) {
+            if (message is Map && message['path'] is String) {
+              paths.add(message['path'] as String);
+            }
+          }
+        }
+      } catch (error) {
+        debugPrint('Local chat history parse error: $error');
+      }
+      await preferences.remove(key);
+    }
+  }
+
+  try {
+    final directory = await getApplicationDocumentsDirectory();
+    if (await directory.exists()) {
+      await for (final entity in directory.list()) {
+        if (entity is File &&
+            (entity.path.contains('/shadow_media_') ||
+                entity.path.contains('/shadow_voice_') ||
+                entity.path.contains('/shadow_secret_voice_'))) {
+          paths.add(entity.path);
+        }
+      }
+    }
+  } catch (error) {
+    debugPrint('Local chat files scan error: $error');
+  }
+
+  for (final path in paths) {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (error) {
+      debugPrint('Local chat file delete error: $error');
+    }
+  }
+  final clearedAt = DateTime.now();
+  if (preferences != null) {
+    await preferences.setString(
+      'local_history_cleared_at',
+      clearedAt.toIso8601String(),
+    );
+  }
+  chatHistoryClearedAtNotifier.value = Timestamp.fromDate(clearedAt);
 }
 
 bool isMessageVisibleAfterHistoryClear(
@@ -4537,7 +4597,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                           Padding(
                             padding: EdgeInsets.symmetric(horizontal: 12),
                             child: Text(
-                              'إضافة منفصلة بالمعرّف السهل',
+                              'إضافة جهة اتصال بالمعرّف',
                               style: TextStyle(
                                 color: Color(0xFF38E8A5),
                                 fontSize: 12,
@@ -4565,7 +4625,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'إضافة يدوية بالمعرّف',
+                            'إضافة جهة اتصال بالمعرّف',
                             style: TextStyle(
                               color: Colors.white,
                               fontSize: 14,
@@ -4574,7 +4634,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                           ),
                           const SizedBox(height: 4),
                           const Text(
-                            'أدخل المعرّف السهل للمستخدم لإضافته مباشرة',
+                            'أدخل المعرّف العام للشخص لإرسال طلب إضافة مباشر',
                             style: TextStyle(color: Colors.white70, fontSize: 12),
                           ),
                           const SizedBox(height: 10),
@@ -4584,8 +4644,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
                             textDirection: TextDirection.ltr,
                             textAlign: TextAlign.start,
                             decoration: const InputDecoration(
-                              labelText: 'المعرّف السهل',
-                              hintText: 'SC-A1B2C3',
+                              labelText: 'المعرّف العام',
+                              hintText: 'مثال: SC-A1B2C3',
                               labelStyle: TextStyle(color: Colors.white70),
                               hintStyle: TextStyle(color: Colors.white54),
                               prefixIcon: Icon(
@@ -8023,7 +8083,7 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
               style: TextStyle(color: Colors.redAccent),
             ),
             content: const Text(
-              'سيتم إخفاء الرسائل السابقة من حسابك في جميع المحادثات، وستظل ظاهرة للمشاركين الآخرين.',
+              'سيتم حذف سجل الشات والملفات المحفوظة على هذا الجهاز فقط.',
               style: TextStyle(color: Colors.white70),
             ),
             actions: [
