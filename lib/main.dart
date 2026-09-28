@@ -296,6 +296,8 @@ final ValueNotifier<bool> secretGroupLockEnabledNotifier =
 final ValueNotifier<String?> secretGroupPasswordHashNotifier =
     ValueNotifier<String?>(null);
 final ValueNotifier<int> clearHistoryNotifier = ValueNotifier<int>(0);
+final ValueNotifier<Timestamp?> chatHistoryClearedAtNotifier =
+  ValueNotifier<Timestamp?>(null);
 final ValueNotifier<bool> globalDarkModeNotifier = ValueNotifier<bool>(true);
 final ValueNotifier<Uint8List?> userProfileImageBytesNotifier =
     ValueNotifier<Uint8List?>(null);
@@ -663,6 +665,17 @@ String resolveContactDisplayName(Object? value, {required String fallback}) {
   return sanitizeDisplayName(value as String);
 }
 
+String resolveLiveContactDisplayName(Object? liveName, Object? savedName) {
+  final savedDisplayName = resolveContactDisplayName(
+    savedName,
+    fallback: 'مستخدم',
+  );
+  return resolveContactDisplayName(
+    liveName,
+    fallback: savedDisplayName,
+  );
+}
+
 Future<void> syncUserDisplayNameAcrossApp(String newName) async {
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) return;
@@ -700,22 +713,6 @@ Future<void> syncUserDisplayNameAcrossApp(String newName) async {
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-  final contactsSnapshot = await firestore
-      .collection('users')
-      .doc(user.uid)
-      .collection(contactsCollectionName(ContactScope.regular))
-      .get();
-
-  for (final doc in contactsSnapshot.docs) {
-    await doc.reference.set(
-      {
-        'displayName': cleanedName,
-        'name': cleanedName,
-        'updatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
-  }
 }
 
 Future<void> loadRoomOwnerKey() async {
@@ -919,6 +916,10 @@ Future<Map<String, dynamic>> loadPrivacySettings() async {
         .doc('privacy')
         .get();
     final data = snapshot.data() ?? {};
+    chatHistoryClearedAtNotifier.value =
+      data['historyClearedAt'] is Timestamp
+      ? data['historyClearedAt'] as Timestamp
+      : null;
     if (data['ghostMode'] is bool) {
       final ghostMode = data['ghostMode'] as bool;
       ghostModeNotifier.value = ghostMode;
@@ -973,32 +974,23 @@ Future<void> deleteAllChatHistoryForUser() async {
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) return;
 
-  try {
-    final snapshot = await FirebaseFirestore.instance
-        .collectionGroup('messages')
-        .get();
-    var batch = FirebaseFirestore.instance.batch();
-    var operationCount = 0;
+  final clearedAt = Timestamp.now();
+  await FirebaseFirestore.instance
+      .collection('users')
+      .doc(user.uid)
+      .collection('settings')
+      .doc('privacy')
+      .set({'historyClearedAt': clearedAt}, SetOptions(merge: true));
+  chatHistoryClearedAtNotifier.value = clearedAt;
+}
 
-    Future<void> commitBatch() async {
-      if (operationCount == 0) return;
-      await batch.commit();
-      batch = FirebaseFirestore.instance.batch();
-      operationCount = 0;
-    }
-
-    for (final message in snapshot.docs) {
-      batch.update(message.reference, {
-        'deletedFor': FieldValue.arrayUnion([user.uid]),
-      });
-      operationCount++;
-      if (operationCount == 450) await commitBatch();
-    }
-    await commitBatch();
-  } catch (error) {
-    debugPrint('Full chat history delete error: $error');
-    rethrow;
-  }
+bool isMessageVisibleAfterHistoryClear(
+  Object? createdAt, {
+  required Timestamp? clearedAt,
+}) {
+  if (clearedAt == null) return true;
+  if (createdAt is! Timestamp) return false;
+  return createdAt.compareTo(clearedAt) > 0;
 }
 
 Future<void> deleteExpiredOwnChatMessages(String chatId) async {
@@ -2676,17 +2668,26 @@ class _ChatListScreenState extends State<ChatListScreen> {
                           itemCount: contacts.length,
                           itemBuilder: (context, index) {
                             final contactData = contacts[index].data();
-                            final contactName = resolveContactDisplayName(
-                              contactData['displayName'],
-                              fallback: 'مستخدم',
-                            );
+                            final savedContactName = contactData['displayName'];
                             final lastMessage = contactData['lastMessage'] ?? 'لا توجد رسائل';
                             final contactUid = contacts[index].id;
                             final status = (contactData['status'] as String?) ?? 'pending';
                             final isIncomingRequest = status == 'incoming';
                             final isPendingRequest = status == 'pending';
 
-                            return Dismissible(
+                            return StreamBuilder<
+                              DocumentSnapshot<Map<String, dynamic>>
+                            >(
+                              stream: FirebaseFirestore.instance
+                                  .collection('publicProfiles')
+                                  .doc(contactUid)
+                                  .snapshots(),
+                              builder: (context, profileSnapshot) {
+                                final contactName = resolveLiveContactDisplayName(
+                                  profileSnapshot.data?.data()?['displayName'],
+                                  savedContactName,
+                                );
+                                return Dismissible(
                               key: ValueKey('chat-$contactUid'),
                               direction: DismissDirection.endToStart,
                               background: Container(
@@ -2863,6 +2864,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                   },
                                 ),
                               ),
+                                );
+                              },
                             );
                           },
                         );
@@ -3612,6 +3615,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   final TextEditingController _contactIdController = TextEditingController();
   final TextEditingController _nameController = TextEditingController();
   final ScrollController _headerScrollController = ScrollController();
+  final GlobalKey _manualAddSectionKey = GlobalKey();
   final Set<String> _sendingRequestUids = <String>{};
   bool _isConfiguredOwner = false;
   bool _checkingOwnerPermission = false;
@@ -3621,6 +3625,17 @@ class _ContactsScreenState extends State<ContactsScreen> {
       widget.scope == ContactScope.group ||
       !firebaseReady ||
       _isConfiguredOwner;
+
+  void _scrollToManualAddSection() {
+    final targetContext = _manualAddSectionKey.currentContext;
+    if (targetContext == null) return;
+    Scrollable.ensureVisible(
+      targetContext,
+      duration: const Duration(milliseconds: 550),
+      curve: Curves.easeInOutCubic,
+      alignment: 0.08,
+    );
+  }
 
   @override
   void initState() {
@@ -4244,8 +4259,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
                 child: Scrollbar(
                   controller: _headerScrollController,
                   thumbVisibility: true,
+                  thickness: 4,
+                  radius: const Radius.circular(8),
+                  interactive: true,
                   child: SingleChildScrollView(
                     controller: _headerScrollController,
+                    physics: const BouncingScrollPhysics(),
                     padding: const EdgeInsets.all(16),
                     child: Column(
                 children: [
@@ -4363,13 +4382,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                                         message:
                                             'لا يوجد مستخدمون آخرون مسجلون حاليًا. أضف المستخدم بمعرّفه من النموذج أدناه.',
                                         actionLabel: 'الإضافة بالمعرّف',
-                                        onAction: () {
-                                          _headerScrollController.animateTo(
-                                            _headerScrollController.position.maxScrollExtent,
-                                            duration: const Duration(milliseconds: 350),
-                                            curve: Curves.easeOut,
-                                          );
-                                        },
+                                        onAction: _scrollToManualAddSection,
                                       );
                                     }
 
@@ -4511,26 +4524,41 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     Align(
                       alignment: Alignment.center,
                       child: TextButton.icon(
-                        onPressed: () {
-                          _headerScrollController.animateTo(
-                            _headerScrollController.position.maxScrollExtent,
-                            duration: const Duration(milliseconds: 350),
-                            curve: Curves.easeOut,
-                          );
-                        },
-                        icon: const Icon(Icons.keyboard_arrow_down),
-                        label: const Text('كتابة المعرّف يدويًا'),
+                        onPressed: _scrollToManualAddSection,
+                        icon: const Icon(Icons.south_rounded, size: 18),
+                        label: const Text('الانتقال للإضافة اليدوية'),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4, bottom: 14),
+                      child: Row(
+                        children: [
+                          Expanded(child: Divider(color: Colors.white24)),
+                          Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 12),
+                            child: Text(
+                              'إضافة منفصلة بالمعرّف السهل',
+                              style: TextStyle(
+                                color: Color(0xFF38E8A5),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          Expanded(child: Divider(color: Colors.white24)),
+                        ],
                       ),
                     ),
                     Container(
+                      key: _manualAddSectionKey,
                       width: double.infinity,
-                      margin: const EdgeInsets.only(top: 8, bottom: 12),
+                      margin: const EdgeInsets.only(bottom: 12),
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF0F1C1A),
+                        color: const Color(0xFF101A22),
                         borderRadius: BorderRadius.circular(16),
                         border: Border.all(
-                          color: const Color(0xFF38E8A5).withOpacity(0.35),
+                          color: const Color(0xFF38E8A5).withOpacity(0.55),
                         ),
                       ),
                       child: Column(
@@ -6018,6 +6046,12 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                 return null;
               }
               final timestamp = data['createdAt'];
+              if (!isMessageVisibleAfterHistoryClear(
+                timestamp,
+                clearedAt: chatHistoryClearedAtNotifier.value,
+              )) {
+                return null;
+              }
               if (accessStartedAt != null &&
                   timestamp is Timestamp &&
                   timestamp.toDate().isBefore(accessStartedAt)) {
@@ -7838,13 +7872,13 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
                 color: Colors.redAccent,
               ),
               title: Text(
-                'حذف سجل المحادثات بالكامل',
+                'حذف سجل المحادثات من حسابك',
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurface,
                 ),
               ),
               subtitle: Text(
-                'مسح كافة الرسائل المخزنة نهائياً',
+                'إخفاء الرسائل السابقة من حسابك',
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
@@ -7985,11 +8019,11 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
           child: AlertDialog(
             backgroundColor: Colors.grey[900],
             title: const Text(
-              'تحذير أمني',
+              'حذف سجل المحادثات من حسابك',
               style: TextStyle(color: Colors.redAccent),
             ),
             content: const Text(
-              'هل أنت متأكد من حذف جميع سجلات الشات نهائياً؟ لا يمكن التراجع عن هذه الخطوة.',
+              'سيتم إخفاء الرسائل السابقة من حسابك في جميع المحادثات، وستظل ظاهرة للمشاركين الآخرين.',
               style: TextStyle(color: Colors.white70),
             ),
             actions: [
@@ -8006,14 +8040,14 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
                   style: TextStyle(color: Colors.redAccent),
                 ),
                 onPressed: () async {
-                  clearHistoryNotifier.value++;
                   Navigator.of(dialogContext).pop();
                   try {
                     await deleteAllChatHistoryForUser();
+                    clearHistoryNotifier.value++;
                     if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('تم حذف سجل المحادثات من Firebase'),
+                          content: Text('تم حذف سجل المحادثات من حسابك'),
                         ),
                       );
                     }
@@ -8936,6 +8970,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               final data = doc.data();
               final deletedFor = data['deletedFor'];
               final expiresAt = data['expiresAt'];
+                final createdAt = data['createdAt'];
               if (currentUid != null &&
                   deletedFor is List &&
                   deletedFor.contains(currentUid)) {
@@ -8943,6 +8978,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               }
               if (expiresAt is Timestamp &&
                   expiresAt.compareTo(Timestamp.now()) <= 0) {
+                return null;
+              }
+              if (!isMessageVisibleAfterHistoryClear(
+                createdAt,
+                clearedAt: chatHistoryClearedAtNotifier.value,
+              )) {
                 return null;
               }
               final mediaUrl = data['mediaUrl'] as String?;
@@ -10697,7 +10738,12 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
 
   Future<void> _pickProfileImage() async {
     try {
-      final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+      final XFile? image = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 85,
+      );
       if (image == null) return;
 
       final bytes = await image.readAsBytes();
@@ -10719,33 +10765,56 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
   }
 
   Future<void> _saveLocalProfileImage(Uint8List bytes) async {
+    final userKey = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
+    try {
+      final directory = await getApplicationSupportDirectory();
+      final imageFile = File('${directory.path}/profile_image_$userKey');
+      await imageFile.writeAsBytes(bytes, flush: true);
+      return;
+    } catch (error) {
+      debugPrint('Local profile image file save error: $error');
+    }
+
     try {
       final preferences = await getSafeSharedPreferences();
-      if (preferences == null) return;
-      final userKey = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
-      await preferences.setString(
+      await preferences?.setString(
         'profile_image_base64_$userKey',
         base64Encode(bytes),
       );
     } catch (error) {
-      debugPrint('Local profile image save error: $error');
+      debugPrint('Local profile image fallback save error: $error');
     }
   }
 
   Future<void> _loadLocalProfileImage() async {
+    final userKey = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
     try {
-      final preferences = await getSafeSharedPreferences();
-      if (preferences == null) return;
-      final userKey = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
-      final encodedImage = preferences.getString('profile_image_base64_$userKey');
-      if (encodedImage != null && encodedImage.isNotEmpty) {
-        final bytes = base64Decode(encodedImage);
+      final directory = await getApplicationSupportDirectory();
+      final imageFile = File('${directory.path}/profile_image_$userKey');
+      if (await imageFile.exists()) {
+        final bytes = await imageFile.readAsBytes();
         if (bytes.isNotEmpty) {
           userProfileImageBytesNotifier.value = bytes;
+          return;
         }
       }
     } catch (error) {
-      debugPrint('Local profile image load error: $error');
+      debugPrint('Local profile image file load error: $error');
+    }
+
+    try {
+      final preferences = await getSafeSharedPreferences();
+      final encodedImage = preferences?.getString(
+        'profile_image_base64_$userKey',
+      );
+      if (encodedImage == null || encodedImage.isEmpty) return;
+      final bytes = base64Decode(encodedImage);
+      if (bytes.isNotEmpty) {
+        userProfileImageBytesNotifier.value = bytes;
+        await _saveLocalProfileImage(bytes);
+      }
+    } catch (error) {
+      debugPrint('Local profile image fallback load error: $error');
     }
   }
 
@@ -11128,17 +11197,27 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
                                                     width: 112,
                                                     height: 112,
                                                     fit: BoxFit.cover,
-                                                        errorBuilder: (
-                                                          context,
-                                                          error,
-                                                          stackTrace,
-                                                        ) => Icon(
-                                                          Icons.person,
-                                                          size: 65,
-                                                          color: isDark
-                                                              ? const Color(0xFF00FF66)
-                                                              : Colors.black54,
-                                                        ),
+                                                    cacheWidth: 224,
+                                                    cacheHeight: 224,
+                                                    gaplessPlayback: true,
+                                                    errorBuilder: (
+                                                      context,
+                                                      error,
+                                                      stackTrace,
+                                                    ) {
+                                                      debugPrint(
+                                                        'Profile image decode error: $error',
+                                                      );
+                                                      return Icon(
+                                                        Icons.person,
+                                                        size: 65,
+                                                        color: isDark
+                                                            ? const Color(
+                                                                0xFF00FF66,
+                                                              )
+                                                            : Colors.black54,
+                                                      );
+                                                    },
                                                   ),
                                                 )
                                               : Icon(

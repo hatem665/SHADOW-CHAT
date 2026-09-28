@@ -6,6 +6,7 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -61,6 +62,33 @@ void main() {
       'علي أحمد',
     );
     expect(sanitizeDisplayName(''), isEmpty);
+  });
+
+  test('live contact name takes precedence over the saved name', () {
+    expect(resolveLiveContactDisplayName('الاسم الجديد', 'الاسم القديم'), 'الاسم الجديد');
+    expect(resolveLiveContactDisplayName(null, 'الاسم القديم'), 'الاسم القديم');
+  });
+
+  test('chat history cutoff hides old messages but preserves newer ones', () {
+    final clearedAt = Timestamp.fromDate(DateTime.utc(2026, 9, 28, 12));
+    expect(
+      isMessageVisibleAfterHistoryClear(
+        Timestamp.fromDate(DateTime.utc(2026, 9, 28, 11)),
+        clearedAt: clearedAt,
+      ),
+      isFalse,
+    );
+    expect(
+      isMessageVisibleAfterHistoryClear(
+        Timestamp.fromDate(DateTime.utc(2026, 9, 28, 13)),
+        clearedAt: clearedAt,
+      ),
+      isTrue,
+    );
+    expect(
+      isMessageVisibleAfterHistoryClear(null, clearedAt: clearedAt),
+      isFalse,
+    );
   });
 
   test('unknown contact cleanup preserves pending and incoming requests', () {
