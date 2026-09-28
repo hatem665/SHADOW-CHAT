@@ -2340,8 +2340,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
             onPressed: () async {
               final String password = passwordController.text.trim();
               if (password.length < 4) return;
-                              const Text(
-                                'محتوى الغرفة متاح للأعضاء المصرح لهم فقط ولا يظهر في السجل الرئيسي للتطبيق.',
+              try {
+                await saveChatPassword(chatId ?? chatName, password);
               } catch (error) {
                 debugPrint('Chat password save error: $error');
                 return;
