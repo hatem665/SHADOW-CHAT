@@ -2923,31 +2923,45 @@ Future<String?> ensurePersonalSecretGroup() async {
       : profileName;
   final groupTitle = 'مجموعة $accountName';
   final roomRef = firestore.collection('rooms').doc(roomId);
-  await roomRef.set({
-    'ownerUid': user.uid,
-    'title': groupTitle,
-    'updatedAt': FieldValue.serverTimestamp(),
-  }, SetOptions(merge: true));
-  final ownerMembership = roomRef.collection('members').doc(user.uid);
-  if (!(await ownerMembership.get()).exists) {
-    await ownerMembership.set({
+  final roomSnapshot = await roomRef.get();
+  if (!roomSnapshot.exists) {
+    await roomRef.set({
+      'ownerUid': user.uid,
+      'title': groupTitle,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+  final ownerMembershipRef = roomRef.collection('members').doc(user.uid);
+  final groupIndexRef = firestore
+      .collection('users')
+      .doc(user.uid)
+      .collection('secretGroups')
+      .doc(roomId);
+  final existingRecords = await Future.wait([
+    ownerMembershipRef.get(),
+    groupIndexRef.get(),
+  ]);
+  final batch = firestore.batch();
+  var hasUpdates = false;
+  if (!existingRecords[0].exists) {
+    batch.set(ownerMembershipRef, {
       'displayName': accountName,
       'addedBy': user.uid,
       'role': 'owner',
       'addedAt': FieldValue.serverTimestamp(),
     });
+    hasUpdates = true;
   }
-  await firestore
-      .collection('users')
-      .doc(user.uid)
-      .collection('secretGroups')
-      .doc(roomId)
-      .set({
-        'roomId': roomId,
-        'ownerUid': user.uid,
-        'title': groupTitle,
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+  if (!existingRecords[1].exists) {
+    batch.set(groupIndexRef, {
+      'roomId': roomId,
+      'ownerUid': user.uid,
+      'title': groupTitle,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    hasUpdates = true;
+  }
+  if (hasUpdates) await batch.commit();
   return roomId;
 }
 
@@ -2959,9 +2973,6 @@ class SecretGroupsScreen extends StatefulWidget {
 }
 
 class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
-  bool _loading = true;
-  String? _error;
-
   @override
   void initState() {
     super.initState();
@@ -2973,9 +2984,7 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
       await ensurePersonalSecretGroup();
     } catch (error) {
       debugPrint('Secret groups preparation failed: $error');
-      _error = 'تعذر تحميل مجموعاتك الآن';
     }
-    if (mounted) setState(() => _loading = false);
   }
 
   @override
@@ -2987,10 +2996,6 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
         appBar: AppBar(title: const Text('مجموعاتي السرية')),
         body: user == null || !firebaseReady
             ? const Center(child: Text('يلزم الاتصال بالتطبيق أولًا'))
-            : _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _error != null
-            ? Center(child: Text(_error!))
             : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: FirebaseFirestore.instance
                     .collection('users')
@@ -4902,17 +4907,20 @@ class _SecretChatScreenState extends State<SecretChatScreen>
   }
 
   Future<void> _prepareSecretChat() async {
-    if (!_isBlackRoom && _roomId == secretGroupRoomId(
-      FirebaseAuth.instance.currentUser?.uid ?? '',
-    )) {
-      await ensurePersonalSecretGroup();
-    }
     final roomId = _roomId;
-    _accessStartedAt = await ensureSecretAccessStart(roomId);
-    await Future.wait([
-      _loadSecretMembership(),
-      _loadGroupPassword(),
-    ]);
+    if (_isBlackRoom) {
+      _accessStartedAt = await ensureSecretAccessStart(roomId);
+      await _loadSecretMembership();
+      _listenToSecretMessages();
+      return;
+    }
+
+    final accessStartFuture = ensureSecretAccessStart(roomId);
+    final membershipFuture = _loadSecretMembership();
+    final passwordFuture = _loadGroupPassword();
+    _accessStartedAt = await accessStartFuture;
+    await passwordFuture;
+    unawaited(membershipFuture);
     _listenToSecretMessages();
   }
 
@@ -4996,10 +5004,6 @@ class _SecretChatScreenState extends State<SecretChatScreen>
 
     try {
       final roomId = _roomId;
-      if (roomId.startsWith('secret_group_') &&
-          roomId == secretGroupRoomId(user.uid)) {
-        await ensurePersonalSecretGroup();
-      }
       final membership = await FirebaseFirestore.instance
           .collection('rooms')
           .doc(roomId)
@@ -7712,6 +7716,7 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   final List<Message> _messages = [];
+  final ScrollController _messagesScrollController = ScrollController();
   final TextEditingController _controller = TextEditingController();
   final AudioPlayer _chatAudioPlayer = AudioPlayer();
   final AudioPlayer _messageNotificationPlayer = AudioPlayer();
@@ -7928,6 +7933,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _lockPulseController.dispose();
     unawaited(_voiceRecorder.stop());
     _voiceRecorder.dispose();
+    _messagesScrollController.dispose();
     _controller.dispose();
     _chatPasswordController.dispose();
     super.dispose();
@@ -7935,6 +7941,24 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   void _clearChatMessages() {
     if (mounted) setState(_messages.clear);
+  }
+
+  void _scrollToLatestMessage({required bool force}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_messagesScrollController.hasClients) return;
+      final position = _messagesScrollController.position;
+      final isNearLatest =
+          position.maxScrollExtent - position.pixels <= 120;
+      if (force || isNearLatest) {
+        unawaited(
+          _messagesScrollController.animateTo(
+            position.maxScrollExtent,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+          ),
+        );
+      }
+    });
   }
 
   void _onWhaleSoundChanged() {
@@ -8022,6 +8046,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           (snapshot) {
             if (!mounted) return;
             final currentUid = FirebaseAuth.instance.currentUser?.uid;
+            final isFirstSnapshot = !_hasLoadedMessages;
+            final shouldFollowLatest = isFirstSnapshot ||
+                !_messagesScrollController.hasClients ||
+                _messagesScrollController.position.maxScrollExtent -
+                        _messagesScrollController.position.pixels <=
+                    120;
             final shouldNotify =
                 _hasLoadedMessages &&
                 snapshot.docChanges.any(
@@ -8079,6 +8109,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                   .toList());
             });
             _hasLoadedMessages = true;
+            if (shouldFollowLatest) {
+              _scrollToLatestMessage(force: isFirstSnapshot);
+            }
             if (shouldNotify) {
               unawaited(_playMessageNotification());
               final incomingText = snapshot.docs
@@ -8206,6 +8239,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _chatLocked = false;
         _chatPasswordController.clear();
       });
+      _scrollToLatestMessage(force: true);
       if (whaleSoundNotifier.value) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted && !_chatLocked) unawaited(_playWhaleSound());
@@ -9451,6 +9485,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                     ),
                     Expanded(
                       child: ListView.builder(
+                        controller: _messagesScrollController,
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                         itemCount: _messages.length,
                         itemBuilder: (context, index) {
