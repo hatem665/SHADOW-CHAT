@@ -1730,6 +1730,9 @@ class ShadowChatApp extends StatelessWidget {
                   centerTitle: true,
                 ),
                 listTileTheme: const ListTileThemeData(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(16)),
+                  ),
                   textColor: Colors.white,
                   subtitleTextStyle: TextStyle(color: Colors.white),
                   iconColor: Colors.white,
@@ -1757,11 +1760,6 @@ class ShadowChatApp extends StatelessWidget {
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.all(Radius.circular(14)),
                     borderSide: BorderSide(color: Color(0xFF38E8A5), width: 1.6),
-                  ),
-                ),
-                listTileTheme: const ListTileThemeData(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(16)),
                   ),
                 ),
                 elevatedButtonTheme: ElevatedButtonThemeData(
