@@ -98,6 +98,54 @@ void main() {
     );
   });
 
+  test('secret room member count treats owner as a single counted member and avoids duplicates', () {
+    expect(
+      resolveSecretRoomMemberCount(
+        memberIds: ['u1', 'u2', 'u1'],
+        ownerUid: 'u2',
+      ),
+      2,
+    );
+    expect(
+      resolveSecretRoomMemberCount(
+        memberIds: ['u1', 'u2', 'u3'],
+        ownerUid: 'owner',
+      ),
+      4,
+    );
+    expect(
+      resolveSecretRoomMemberCount(
+        memberIds: List.generate(120, (index) => 'u$index'),
+        ownerUid: 'owner',
+      ),
+      100,
+    );
+  });
+
+  test('secret groups empty state is hidden while the first group is still being prepared', () {
+    expect(
+      shouldShowSecretGroupsEmptyState(
+        isPreparing: true,
+        groupsCount: 0,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowSecretGroupsEmptyState(
+        isPreparing: false,
+        groupsCount: 0,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldShowSecretGroupsEmptyState(
+        isPreparing: false,
+        groupsCount: 1,
+      ),
+      isFalse,
+    );
+  });
+
   testWidgets('Shadow Chat app starts', (WidgetTester tester) async {
     appLockEnabledNotifier.value = true;
     appLockPasswordNotifier.value = await hashPassword('test-app-lock-password');

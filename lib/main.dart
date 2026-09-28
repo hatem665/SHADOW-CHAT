@@ -59,6 +59,19 @@ bool isSecretRoomAtCapacity(int memberCount) {
   return memberCount >= maxSecretRoomMembers;
 }
 
+int resolveSecretRoomMemberCount({
+  required List<String> memberIds,
+  String? ownerUid,
+}) {
+  final uniqueIds = <String>{
+    ...memberIds.where((id) => id.trim().isNotEmpty),
+  };
+  if (ownerUid != null && ownerUid.trim().isNotEmpty) {
+    uniqueIds.add(ownerUid);
+  }
+  return uniqueIds.length.clamp(0, maxSecretRoomMembers);
+}
+
 DocumentReference<Map<String, dynamic>> secretRoomCapacityReference() =>
     FirebaseFirestore.instance
         .collection('rooms')
@@ -69,30 +82,34 @@ DocumentReference<Map<String, dynamic>> secretRoomCapacityReference() =>
 Future<int> countRoomMembers(String roomId) async {
   if (!firebaseReady) return 0;
   try {
-    if (roomId == 'secret_room') {
-      final capacity = await secretRoomCapacityReference().get();
-      final storedCount = capacity.data()?['memberCount'];
-      if (storedCount is int) return storedCount;
-    }
     final snapshot = await FirebaseFirestore.instance
         .collection('rooms')
         .doc(roomId)
         .collection('members')
         .limit(maxSecretRoomMembers + 1)
         .get();
-    var memberCount = snapshot.docs.length;
+
+    final memberIds = snapshot.docs.map((doc) => doc.id).toList();
+    String? ownerUid;
     if (roomId == 'secret_room') {
       final owner = await FirebaseFirestore.instance
           .collection('config')
           .doc('app')
           .get();
-      final ownerUid = owner.data()?['ownerUid'];
-      if (ownerUid is String &&
-          !snapshot.docs.any((member) => member.id == ownerUid)) {
-        memberCount++;
-      }
+      ownerUid = owner.data()?['ownerUid'] as String?;
+      final actualCount = resolveSecretRoomMemberCount(
+        memberIds: memberIds,
+        ownerUid: ownerUid,
+      );
+      await secretRoomCapacityReference().set({
+        'ownerUid': ownerUid ?? '',
+        'memberCount': actualCount,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      return actualCount;
     }
-    return memberCount;
+
+    return memberIds.length;
   } catch (error) {
     debugPrint('Room member count failed for $roomId: $error');
     return 0;
@@ -106,8 +123,6 @@ Future<void> ensureSecretRoomCapacityInitialized() async {
   }
 
   final capacityRef = secretRoomCapacityReference();
-  if ((await capacityRef.get()).exists) return;
-
   final ownerSnapshot = await FirebaseFirestore.instance
       .collection('config')
       .doc('app')
@@ -122,17 +137,18 @@ Future<void> ensureSecretRoomCapacityInitialized() async {
       .collection('members')
       .limit(maxSecretRoomMembers + 1)
       .get();
-  final ownerAlreadyListed = members.docs.any((member) => member.id == user.uid);
-  final existingCount = members.docs.length + (ownerAlreadyListed ? 0 : 1);
-  final initialCount =
-      existingCount.clamp(1, maxSecretRoomMembers).toInt();
+  final initialCount = resolveSecretRoomMemberCount(
+    memberIds: members.docs.map((doc) => doc.id).toList(),
+    ownerUid: user.uid,
+  );
 
   try {
     await capacityRef.set({
       'ownerUid': user.uid,
       'memberCount': initialCount,
       'createdAt': FieldValue.serverTimestamp(),
-    });
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   } catch (error) {
     if (!(await capacityRef.get()).exists) rethrow;
   }
@@ -243,14 +259,26 @@ Future<void> refreshSecretRoomMemberNotifier() async {
         .get();
     final memberIds = snapshot.docs.map((doc) => doc.id).toList();
     final owner = await FirebaseFirestore.instance
-      .collection('config')
-      .doc('app')
-      .get();
-    final ownerUid = owner.data()?['ownerUid'];
-    if (ownerUid is String && !memberIds.contains(ownerUid)) {
-      memberIds.add(ownerUid);
+        .collection('config')
+        .doc('app')
+        .get();
+    final ownerUid = owner.data()?['ownerUid'] as String?;
+    final uniqueMembers = <String>{
+      ...memberIds.where((id) => id.trim().isNotEmpty),
+    };
+    if (ownerUid != null && ownerUid.trim().isNotEmpty) {
+      uniqueMembers.add(ownerUid);
     }
-    secretRoomMembersNotifier.value = memberIds;
+    secretRoomMembersNotifier.value = uniqueMembers.toList();
+    final actualCount = resolveSecretRoomMemberCount(
+      memberIds: uniqueMembers.toList(),
+      ownerUid: ownerUid,
+    );
+    await secretRoomCapacityReference().set({
+      'ownerUid': ownerUid ?? '',
+      'memberCount': actualCount,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   } catch (error) {
     debugPrint('Secret room member refresh failed: $error');
   }
@@ -1550,41 +1578,127 @@ class ShadowChatApp extends StatelessWidget {
             return MaterialApp(
               debugShowCheckedModeBanner: false,
               theme: ThemeData.light(useMaterial3: true).copyWith(
-                scaffoldBackgroundColor: const Color(0xFFF4F7F6),
+                scaffoldBackgroundColor: const Color(0xFFF5F7F8),
                 colorScheme: ColorScheme.fromSeed(
                   seedColor: const Color(0xFF167A5A),
+                  brightness: Brightness.light,
                 ),
                 appBarTheme: const AppBarTheme(
-                  backgroundColor: Color(0xFFEAF1EF),
-                  foregroundColor: Color(0xFF14211D),
+                  backgroundColor: Color(0xFFEFF5F3),
+                  foregroundColor: Color(0xFF13211D),
+                  elevation: 0,
+                  centerTitle: true,
                 ),
                 cardTheme: const CardThemeData(
                   color: Colors.white,
+                  elevation: 0,
                   surfaceTintColor: Colors.transparent,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(18)),
+                  ),
                 ),
+                dividerTheme: const DividerThemeData(color: Color(0x1F1F2933)),
                 inputDecorationTheme: const InputDecorationTheme(
                   filled: true,
-                  fillColor: Color(0xFFF1F5F3),
+                  fillColor: Color(0xFFF0F4F3),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                    borderSide: BorderSide(color: Color(0xFFE2E8E5)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                    borderSide: BorderSide(color: Color(0xFFE2E8E5)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                    borderSide: BorderSide(color: Color(0xFF167A5A), width: 1.6),
+                  ),
+                ),
+                listTileTheme: const ListTileThemeData(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(16)),
+                  ),
+                ),
+                elevatedButtonTheme: ElevatedButtonThemeData(
+                  style: ElevatedButton.styleFrom(
+                    elevation: 0,
+                    minimumSize: const Size(0, 52),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+                floatingActionButtonTheme: const FloatingActionButtonThemeData(
+                  backgroundColor: Color(0xFF167A5A),
+                  foregroundColor: Colors.white,
+                ),
+                dialogTheme: const DialogThemeData(
+                  backgroundColor: Color(0xFFF9FBFB),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(20)),
+                  ),
                 ),
               ),
               darkTheme: ThemeData.dark(useMaterial3: true).copyWith(
-                scaffoldBackgroundColor: const Color(0xFF101716),
+                scaffoldBackgroundColor: const Color(0xFF0C1217),
                 colorScheme: ColorScheme.fromSeed(
                   seedColor: const Color(0xFF38E8A5),
                   brightness: Brightness.dark,
                 ),
                 appBarTheme: const AppBarTheme(
-                  backgroundColor: Color(0xFF15211F),
+                  backgroundColor: Color(0xFF121B1A),
                   foregroundColor: Color(0xFFE8F3EF),
+                  elevation: 0,
+                  centerTitle: true,
                 ),
                 cardTheme: const CardThemeData(
-                  color: Color(0xFF192522),
+                  color: Color(0xFF171F26),
+                  elevation: 0,
                   surfaceTintColor: Colors.transparent,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(18)),
+                  ),
                 ),
                 dividerTheme: const DividerThemeData(color: Color(0x334DD6A2)),
                 inputDecorationTheme: const InputDecorationTheme(
                   filled: true,
-                  fillColor: Color(0xFF1C2B27),
+                  fillColor: Color(0xFF1A2329),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                    borderSide: BorderSide(color: Color(0xFF25313A)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                    borderSide: BorderSide(color: Color(0xFF25313A)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                    borderSide: BorderSide(color: Color(0xFF38E8A5), width: 1.6),
+                  ),
+                ),
+                listTileTheme: const ListTileThemeData(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(16)),
+                  ),
+                ),
+                elevatedButtonTheme: ElevatedButtonThemeData(
+                  style: ElevatedButton.styleFrom(
+                    elevation: 0,
+                    minimumSize: const Size(0, 52),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+                floatingActionButtonTheme: const FloatingActionButtonThemeData(
+                  backgroundColor: Color(0xFF38E8A5),
+                  foregroundColor: Color(0xFF07130F),
+                ),
+                dialogTheme: const DialogThemeData(
+                  backgroundColor: Color(0xFF161D24),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.all(Radius.circular(20)),
+                  ),
                 ),
               ),
               themeMode: isDark ? ThemeMode.dark : ThemeMode.light,
@@ -2911,6 +3025,13 @@ String contactsCollectionName(ContactScope scope) {
 
 String secretGroupRoomId(String ownerUid) => 'secret_group_$ownerUid';
 
+bool shouldShowSecretGroupsEmptyState({
+  required bool isPreparing,
+  required int groupsCount,
+}) {
+  return !isPreparing && groupsCount == 0;
+}
+
 Future<String?> ensurePersonalSecretGroup() async {
   final user = FirebaseAuth.instance.currentUser;
   if (!firebaseReady || user == null) return null;
@@ -2973,6 +3094,8 @@ class SecretGroupsScreen extends StatefulWidget {
 }
 
 class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
+  bool _isPreparingGroups = true;
+
   @override
   void initState() {
     super.initState();
@@ -2981,9 +3104,47 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
 
   Future<void> _prepareGroups() async {
     try {
+      setState(() => _isPreparingGroups = true);
       await ensurePersonalSecretGroup();
     } catch (error) {
       debugPrint('Secret groups preparation failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _isPreparingGroups = false);
+      }
+    }
+  }
+
+  Future<void> _openOrCreatePersonalGroup() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || !firebaseReady) return;
+
+    try {
+      setState(() => _isPreparingGroups = true);
+      final roomId = await ensurePersonalSecretGroup();
+      if (!mounted || roomId == null) return;
+
+      final profileName = user.displayName?.trim();
+      final displayTitle = profileName != null && profileName.isNotEmpty
+          ? 'مجموعة $profileName'
+          : 'مجموعة ${user.uid.substring(0, 6).toUpperCase()}';
+
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SecretChatScreen(
+            groupId: roomId,
+            chatTitle: displayTitle,
+          ),
+        ),
+      );
+    } catch (error) {
+      debugPrint('Open or create personal secret group failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _isPreparingGroups = false);
+      }
     }
   }
 
@@ -2993,9 +3154,33 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
     return Directionality(
       textDirection: TextDirection.rtl,
       child: Scaffold(
-        appBar: AppBar(title: const Text('مجموعاتي السرية')),
+        backgroundColor: const Color(0xFF0D1117),
+        appBar: AppBar(
+          title: const Text('مجموعاتي السرية'),
+          backgroundColor: const Color(0xFF111827),
+          foregroundColor: Colors.white,
+          elevation: 0,
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(left: 12),
+              child: IconButton(
+                tooltip: 'إنشاء مجموعة سرية',
+                onPressed: _isPreparingGroups ? null : _openOrCreatePersonalGroup,
+                icon: const Icon(Icons.add_rounded, color: Color(0xFF00FF66)),
+              ),
+            ),
+          ],
+        ),
         body: user == null || !firebaseReady
-            ? const Center(child: Text('يلزم الاتصال بالتطبيق أولًا'))
+            ? const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                    'يلزم الاتصال بالتطبيق أولًا',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                ),
+              )
             : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: FirebaseFirestore.instance
                     .collection('users')
@@ -3005,45 +3190,306 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
                     .snapshots(),
                 builder: (context, snapshot) {
                   if (snapshot.hasError) {
-                    return const Center(child: Text('تعذر تحميل المجموعات'));
+                    return const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 48),
+                            SizedBox(height: 12),
+                            Text(
+                              'تعذر تحميل المجموعات',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
                   }
                   if (!snapshot.hasData) {
-                    return const Center(child: CircularProgressIndicator());
+                    return const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(color: Color(0xFF00FF66)),
+                            SizedBox(height: 16),
+                            Text(
+                              'جارٍ تجهيز مجموعاتك...',
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
                   }
+
                   final groups = snapshot.data!.docs;
-                  if (groups.isEmpty) {
-                    return const Center(child: Text('لا توجد مجموعات بعد'));
+                  if (shouldShowSecretGroupsEmptyState(
+                    isPreparing: _isPreparingGroups,
+                    groupsCount: groups.length,
+                  )) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Container(
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF161C2A),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.lock_outline_rounded,
+                                size: 58,
+                                color: Color(0xFF00FF66),
+                              ),
+                              const SizedBox(height: 16),
+                              const Text(
+                                'لا توجد مجموعات بعد',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'سيظهر هنا كل ما تنشئه أو تنضم إليه في المستقبل.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Colors.white.withOpacity(0.7),
+                                  fontSize: 14,
+                                ),
+                              ),
+                              const SizedBox(height: 20),
+                              SizedBox(
+                                width: 210,
+                                child: ElevatedButton.icon(
+                                  onPressed: _isPreparingGroups ? null : _openOrCreatePersonalGroup,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF00FF66),
+                                    foregroundColor: Colors.black,
+                                    padding: const EdgeInsets.symmetric(vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                  ),
+                                  icon: const Icon(Icons.lock_open_rounded),
+                                  label: const Text(
+                                    'إنشاء مجموعتي',
+                                    style: TextStyle(fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
                   }
+
                   return ListView.separated(
+                    padding: const EdgeInsets.all(12),
                     itemCount: groups.length,
-                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    separatorBuilder: (_, __) => const SizedBox(height: 10),
                     itemBuilder: (context, index) {
                       final group = groups[index];
                       final data = group.data();
                       final roomId = data['roomId'] as String? ?? group.id;
                       final title = data['title'] as String? ?? 'مجموعة سرية';
                       final isOwner = data['ownerUid'] == user.uid;
-                      return ListTile(
-                        leading: const CircleAvatar(
-                          child: Icon(Icons.groups_rounded),
-                        ),
-                        title: Text(title),
-                        subtitle: Text(isOwner ? 'مجموعتك' : 'مجموعة تمت دعوتك إليها'),
-                        trailing: const Icon(Icons.chevron_left),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => SecretChatScreen(
-                              groupId: roomId,
-                              chatTitle: title,
+
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF161C2A),
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(color: Colors.white12),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x1A000000),
+                              blurRadius: 10,
+                              offset: Offset(0, 4),
                             ),
-                          ),
+                          ],
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            ClipRRect(
+                              borderRadius: const BorderRadius.only(
+                                topLeft: Radius.circular(18),
+                                topRight: Radius.circular(18),
+                              ),
+                              child: Stack(
+                                children: [
+                                  SizedBox(
+                                    height: 120,
+                                    width: double.infinity,
+                                    child: Image.asset(
+                                      'assets/images/whale.jpg',
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (context, error, stackTrace) {
+                                        return Container(
+                                          color: const Color(0xFF0F172A),
+                                          child: const Icon(
+                                            Icons.groups_rounded,
+                                            size: 52,
+                                            color: Color(0xFF00FF66),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                  Positioned.fill(
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        gradient: LinearGradient(
+                                          begin: Alignment.topCenter,
+                                          end: Alignment.bottomCenter,
+                                          colors: [
+                                            Colors.transparent,
+                                            Colors.black.withOpacity(0.55),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Positioned(
+                                    right: 16,
+                                    bottom: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 6,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.35),
+                                        borderRadius: BorderRadius.circular(999),
+                                      ),
+                                      child: Text(
+                                        isOwner ? 'مجموعتك' : 'سرية',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                              leading: const CircleAvatar(
+                                radius: 22,
+                                backgroundColor: Color(0xFF0F172A),
+                                child: Icon(Icons.lock_rounded, color: Color(0xFF00FF66)),
+                              ),
+                              title: Text(
+                                title,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              subtitle: Text(
+                                isOwner ? 'مجموعتك الخاصة' : 'مجموعة تمت دعوتك إليها',
+                                style: const TextStyle(color: Colors.white70),
+                              ),
+                              trailing: const Icon(
+                                Icons.chevron_left_rounded,
+                                color: Colors.white70,
+                              ),
+                              onTap: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => SecretChatScreen(
+                                    groupId: roomId,
+                                    chatTitle: title,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       );
                     },
                   );
                 },
               ),
+      ),
+    );
+  }
+}
+
+class _AppUsersInfoState extends StatelessWidget {
+  final String message;
+  final IconData? icon;
+  final bool isLoading;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+
+  const _AppUsersInfoState({
+    required this.message,
+    this.icon,
+    this.isLoading = false,
+    this.actionLabel,
+    this.onAction,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF14231F),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (isLoading)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Color(0xFF38E8A5),
+                  ),
+                )
+              else
+                Icon(icon ?? Icons.info_outline_rounded, color: Colors.white54, size: 18),
+              const SizedBox(width: 9),
+              Flexible(
+                child: Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+          if (actionLabel != null && onAction != null) ...[
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: onAction,
+              icon: const Icon(Icons.badge_outlined, size: 17),
+              label: Text(actionLabel!),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -3714,68 +4160,229 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                       stream: FirebaseFirestore.instance
                           .collection('publicProfiles')
-                          .orderBy('updatedAt', descending: true)
                           .snapshots(),
                       builder: (context, snapshot) {
-                        final docs = snapshot.data?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-                        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
-                        final appUsers = docs
-                            .where((doc) => doc.id != currentUserId)
-                            .toList();
-                        if (appUsers.isEmpty) {
-                          return const SizedBox.shrink();
-                        }
                         return Container(
                           margin: const EdgeInsets.only(bottom: 12),
-                          padding: const EdgeInsets.all(12),
+                          padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
                             color: const Color(0xFF0F1C1A),
-                            borderRadius: BorderRadius.circular(14),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: const Color(0xFF38E8A5).withOpacity(0.22),
+                            ),
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                'إضافة من التطبيق بنقرة واحدة',
-                                style: TextStyle(
-                                  color: Color(0xFF38E8A5),
-                                  fontWeight: FontWeight.bold,
-                                ),
+                              Row(
+                                children: [
+                                  Container(
+                                    width: 38,
+                                    height: 38,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF38E8A5).withOpacity(0.12),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: const Icon(
+                                      Icons.person_add_alt_1_rounded,
+                                      color: Color(0xFF38E8A5),
+                                      size: 20,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  const Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'إضافة من مستخدمي التطبيق',
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                        SizedBox(height: 3),
+                                        Text(
+                                          'اختر مستخدمًا للإضافة مباشرة',
+                                          style: TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(height: 8),
-                              ...appUsers.map((doc) {
-                                final data = doc.data();
-                                final publicId = (data['publicId'] as String?) ?? doc.id;
-                                final displayName = (data['displayName'] as String?) ?? 'مستخدم';
-                                final isSending = _sendingRequestUids.contains(doc.id);
-                                return Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        '$displayName · $publicId',
-                                        style: const TextStyle(color: Colors.white70),
-                                      ),
-                                    ),
-                                    FilledButton.icon(
-                                      onPressed: isSending
-                                          ? null
-                                          : () => _addAppUserByTap(
-                                                doc.id,
-                                                publicId,
-                                                displayName,
-                                              ),
-                                      icon: const Icon(Icons.person_add_alt_1, size: 18),
-                                      label: Text(
-                                        isSending
-                                            ? 'جارٍ الإرسال...'
-                                            : widget.scope == ContactScope.regular
-                                            ? 'إرسال طلب'
-                                            : 'إضافة الآن',
-                                      ),
-                                    ),
-                                  ],
-                                );
-                              }).toList(),
+                              const SizedBox(height: 12),
+                              if (snapshot.hasError)
+                                const _AppUsersInfoState(
+                                  icon: Icons.wifi_off_rounded,
+                                  message: 'تعذر تحميل المستخدمين الآن',
+                                )
+                              else if (!snapshot.hasData)
+                                const _AppUsersInfoState(
+                                  isLoading: true,
+                                  message: 'جارٍ تحميل المستخدمين...',
+                                )
+                              else ...[
+                                Builder(
+                                  builder: (context) {
+                                    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+                                    final appUsers = snapshot.data!.docs
+                                        .where((doc) => doc.id != currentUserId)
+                                        .toList()
+                                      ..sort((first, second) {
+                                        final firstUpdatedAt =
+                                            first.data()['updatedAt'];
+                                        final secondUpdatedAt =
+                                            second.data()['updatedAt'];
+                                        if (firstUpdatedAt is Timestamp &&
+                                            secondUpdatedAt is Timestamp) {
+                                          return secondUpdatedAt.compareTo(
+                                            firstUpdatedAt,
+                                          );
+                                        }
+                                        if (firstUpdatedAt is Timestamp) return -1;
+                                        if (secondUpdatedAt is Timestamp) return 1;
+                                        return first.id.compareTo(second.id);
+                                      });
+                                    if (appUsers.isEmpty) {
+                                      return _AppUsersInfoState(
+                                        icon: Icons.group_off_rounded,
+                                        message:
+                                            'لا يوجد مستخدمون آخرون مسجلون حاليًا. أضف المستخدم بمعرّفه من النموذج أدناه.',
+                                        actionLabel: 'الإضافة بالمعرّف',
+                                        onAction: () {
+                                          _headerScrollController.animateTo(
+                                            _headerScrollController.position.maxScrollExtent,
+                                            duration: const Duration(milliseconds: 350),
+                                            curve: Curves.easeOut,
+                                          );
+                                        },
+                                      );
+                                    }
+
+                                    return Column(
+                                      children: [
+                                        Align(
+                                          alignment: Alignment.centerRight,
+                                          child: Text(
+                                            '${appUsers.length} مستخدم',
+                                            style: const TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        ...appUsers.map((doc) {
+                                          final data = doc.data();
+                                          final publicId = (data['publicId'] as String?) ?? doc.id;
+                                          final displayName = (data['displayName'] as String?) ?? 'مستخدم';
+                                          final isSending = _sendingRequestUids.contains(doc.id);
+                                          return Container(
+                                            margin: const EdgeInsets.only(bottom: 8),
+                                            padding: const EdgeInsetsDirectional.only(
+                                              start: 10,
+                                              end: 6,
+                                              top: 9,
+                                              bottom: 9,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF14231F),
+                                              borderRadius: BorderRadius.circular(14),
+                                              border: Border.all(color: Colors.white10),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                CircleAvatar(
+                                                  radius: 20,
+                                                  backgroundColor: const Color(0xFF38E8A5).withOpacity(0.14),
+                                                  child: Text(
+                                                    displayName.trim().isEmpty
+                                                        ? '؟'
+                                                        : String.fromCharCode(displayName.runes.first),
+                                                    style: const TextStyle(
+                                                      color: Color(0xFF38E8A5),
+                                                      fontWeight: FontWeight.w700,
+                                                    ),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 10),
+                                                Expanded(
+                                                  child: Column(
+                                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                                    children: [
+                                                      Text(
+                                                        displayName,
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow.ellipsis,
+                                                        style: const TextStyle(
+                                                          color: Colors.white,
+                                                          fontWeight: FontWeight.w600,
+                                                          fontSize: 14,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 3),
+                                                      Text(
+                                                        publicId,
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow.ellipsis,
+                                                        style: const TextStyle(
+                                                          color: Colors.white54,
+                                                          fontSize: 11,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 6),
+                                                FilledButton.tonalIcon(
+                                                  onPressed: isSending
+                                                      ? null
+                                                      : () => _addAppUserByTap(
+                                                            doc.id,
+                                                            publicId,
+                                                            displayName,
+                                                          ),
+                                                  icon: isSending
+                                                      ? const SizedBox(
+                                                          width: 15,
+                                                          height: 15,
+                                                          child: CircularProgressIndicator(
+                                                            strokeWidth: 2,
+                                                          ),
+                                                        )
+                                                      : const Icon(
+                                                          Icons.person_add_alt_1_rounded,
+                                                          size: 16,
+                                                        ),
+                                                  label: Text(
+                                                    isSending
+                                                        ? 'جارٍ الإرسال'
+                                                        : widget.scope == ContactScope.regular
+                                                            ? 'طلب'
+                                                            : 'إضافة',
+                                                  ),
+                                                  style: FilledButton.styleFrom(
+                                                    foregroundColor: const Color(0xFF38E8A5),
+                                                    backgroundColor: const Color(0xFF38E8A5).withOpacity(0.12),
+                                                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          );
+                                        }),
+                                      ],
+                                    );
+                                  },
+                                ),
+                              ],
                             ],
                           ),
                         );
@@ -4754,6 +5361,7 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
                       ),
                     );
                   }
+
                   final currentUid = FirebaseAuth.instance.currentUser?.uid;
                   final visibleMembers = snapshot.data!.docs.where((member) {
                     if (_isSecretGroup) return true;
@@ -4773,60 +5381,147 @@ class _SecretMembersScreenState extends State<SecretMembersScreen> {
 
                   if (visibleMembers.isEmpty) {
                     return const Center(
-                      child: Text(
-                        'لا يوجد أعضاء حتى الآن',
-                        style: TextStyle(color: Colors.white70),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.group_off_rounded, color: Colors.white38, size: 52),
+                          SizedBox(height: 12),
+                          Text(
+                            'لا يوجد أعضاء حتى الآن',
+                            style: TextStyle(color: Colors.white70, fontSize: 16),
+                          ),
+                        ],
                       ),
                     );
                   }
-                  return ListView.separated(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: visibleMembers.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                    itemBuilder: (context, index) => ListTile(
-                      tileColor: const Color(0xFF18231F),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      leading: const CircleAvatar(
-                        backgroundColor: Color(0xFF38E8A5),
-                        child: Icon(Icons.person, color: Colors.black),
-                      ),
-                      title: Text(
-                        visibleMembers[index].data()['displayName'] ?? 'مجهول الهوية',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
+
+                  return Column(
+                    children: [
+                      Container(
+                        margin: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF171F29),
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(color: const Color(0xFF38E8A5).withOpacity(0.35)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.people_alt_rounded, color: Color(0xFF38E8A5)),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                'أعضاء ${widget.title}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF38E8A5).withOpacity(0.14),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                '${visibleMembers.length}',
+                                style: const TextStyle(
+                                  color: Color(0xFF38E8A5),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      subtitle: Text(
-                        'عضو في ${widget.title}',
-                        style: const TextStyle(color: Colors.white54),
+                      Expanded(
+                        child: ListView.separated(
+                          padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
+                          itemCount: visibleMembers.length,
+                          separatorBuilder: (_, __) => const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            final member = visibleMembers[index];
+                            final memberId = member.id;
+                            final memberName = member.data()['displayName'] ?? 'مجهول الهوية';
+                            final isCurrentUser = memberId == currentUid;
+                            final canRemoveMember = memberId != currentUid &&
+                                (_isSecretGroup
+                                    ? _isGroupOwner
+                                    : canRemoveSecretMember(
+                                        isGroup: false,
+                                        ownerVerified: _ownerVerifiedForRoom,
+                                        isOwnerUser: _ownerVerifiedForRoom,
+                                      ));
+
+                            return Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF171F29),
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(color: Colors.white10),
+                              ),
+                              child: Row(
+                                children: [
+                                  const CircleAvatar(
+                                    radius: 24,
+                                    backgroundColor: Color(0xFF38E8A5),
+                                    child: Icon(Icons.person, color: Colors.black),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          memberName,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 15,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          isCurrentUser ? 'أنت' : 'عضو في ${widget.title}',
+                                          style: const TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  if (canRemoveMember)
+                                    IconButton(
+                                      onPressed: () => _removeMember(memberId, memberName),
+                                      icon: const Icon(Icons.delete_forever_rounded, color: Colors.redAccent),
+                                      tooltip: 'إزالة العضو',
+                                    )
+                                  else if (isCurrentUser)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withOpacity(0.08),
+                                        borderRadius: BorderRadius.circular(999),
+                                      ),
+                                      child: const Text(
+                                        'أنت',
+                                        style: TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
                       ),
-                      trailing: (() {
-                        final memberId = visibleMembers[index].id;
-                        final memberName =
-                            visibleMembers[index].data()['displayName'] ?? 'مجهول الهوية';
-                        final canRemoveMember = memberId != currentUid &&
-                            (_isSecretGroup
-                                ? _isGroupOwner
-                                : canRemoveSecretMember(
-                                    isGroup: false,
-                                    ownerVerified: _ownerVerifiedForRoom,
-                                    isOwnerUser: _ownerVerifiedForRoom,
-                                  ));
-
-                        if (!canRemoveMember) {
-                          return null;
-                        }
-
-                        return IconButton(
-                          onPressed: () => _removeMember(memberId, memberName),
-                          icon: const Icon(Icons.delete_forever, color: Colors.redAccent),
-                          tooltip: 'إزالة العضو',
-                        );
-                      })(),
-                    ),
+                    ],
                   );
                 },
               ),
@@ -5989,7 +6684,92 @@ class _SecretChatScreenState extends State<SecretChatScreen>
           child: Column(
             children: [
               Container(
-                margin: const EdgeInsets.fromLTRB(14, 12, 14, 4),
+                margin: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+                height: 170,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x33000000),
+                      blurRadius: 12,
+                      offset: Offset(0, 5),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(24),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: Image.asset(
+                          'assets/images/whale.jpg',
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return Container(
+                              color: const Color(0xFF101B1F),
+                              child: const Icon(
+                                Icons.lock_rounded,
+                                size: 52,
+                                color: Color(0xFF38E8A5),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      Positioned.fill(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.transparent,
+                                const Color(0xFF0B1016).withOpacity(0.68),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        left: 14,
+                        bottom: 14,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.28),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.shield_rounded,
+                                color: Color(0xFF38E8A5),
+                                size: 16,
+                              ),
+                              const SizedBox(width: 7),
+                              Text(
+                                widget.chatTitle.contains('الغرفة السوداء')
+                                    ? 'Shadow Ops'
+                                    : 'مجموعة سرية',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Container(
+                margin: const EdgeInsets.fromLTRB(14, 0, 14, 4),
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
                   vertical: 10,
