@@ -1712,6 +1712,13 @@ class ShadowChatApp extends StatelessWidget {
               ),
               darkTheme: ThemeData.dark(useMaterial3: true).copyWith(
                 scaffoldBackgroundColor: const Color(0xFF0C1217),
+                textTheme: ThemeData.dark(useMaterial3: true).textTheme.apply(
+                  bodyColor: Colors.white,
+                  displayColor: Colors.white,
+                ),
+                primaryTextTheme: ThemeData.dark(useMaterial3: true)
+                    .primaryTextTheme
+                    .apply(bodyColor: Colors.white, displayColor: Colors.white),
                 colorScheme: ColorScheme.fromSeed(
                   seedColor: const Color(0xFF38E8A5),
                   brightness: Brightness.dark,
@@ -1721,6 +1728,11 @@ class ShadowChatApp extends StatelessWidget {
                   foregroundColor: Color(0xFFE8F3EF),
                   elevation: 0,
                   centerTitle: true,
+                ),
+                listTileTheme: const ListTileThemeData(
+                  textColor: Colors.white,
+                  subtitleTextStyle: TextStyle(color: Colors.white),
+                  iconColor: Colors.white,
                 ),
                 cardTheme: const CardThemeData(
                   color: Color(0xFF171F26),
@@ -4931,8 +4943,8 @@ class _SecretRoomScreenState extends State<SecretRoomScreen>
               obscureText: true,
               textAlign: TextAlign.center,
               decoration: InputDecoration(
-                hintText: '••••••••',
-                hintStyle: const TextStyle(color: Colors.white24),
+                hintText: 'أدخل كود الغرفة',
+                hintStyle: const TextStyle(color: Colors.white60),
                 filled: true,
                 fillColor: Colors.grey[900],
                 enabledBorder: OutlineInputBorder(
@@ -6771,8 +6783,8 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                       letterSpacing: 2,
                     ),
                     decoration: InputDecoration(
-                      hintText: '••••••••••••',
-                      hintStyle: TextStyle(color: Colors.grey[700]),
+                      hintText: 'أدخل مفتاح التشفير',
+                      hintStyle: const TextStyle(color: Colors.white60),
                       filled: true,
                       fillColor: const Color(0xFF141414),
                       border: OutlineInputBorder(
@@ -10487,23 +10499,31 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                       ),
                       child: Row(
                         children: [
-                        _FloatingChatButton(
-                          icon: Icons.send_rounded,
-                          color: const Color(0xFF00FF66),
-                          tooltip: 'إرسال',
-                          onPressed: _sendMessage,
+                        SizedBox(
+                          width: 48,
+                          height: 48,
+                          child: _FloatingChatButton(
+                            icon: Icons.send_rounded,
+                            color: const Color(0xFF00FF66),
+                            tooltip: 'إرسال',
+                            onPressed: _sendMessage,
+                          ),
                         ),
-                        _FloatingChatButton(
-                          icon: _isRecording
-                              ? Icons.stop_circle
-                              : Icons.mic_none_rounded,
-                          color: _isRecording
-                              ? Colors.redAccent
-                              : Colors.amberAccent,
-                          tooltip: _isRecording
-                              ? 'إيقاف التسجيل'
-                              : 'تسجيل رسالة صوتية',
-                          onPressed: _toggleVoiceRecording,
+                        SizedBox(
+                          width: 48,
+                          height: 48,
+                          child: _FloatingChatButton(
+                            icon: _isRecording
+                                ? Icons.stop_circle
+                                : Icons.mic_none_rounded,
+                            color: _isRecording
+                                ? Colors.redAccent
+                                : Colors.amberAccent,
+                            tooltip: _isRecording
+                                ? 'إيقاف التسجيل'
+                                : 'تسجيل رسالة صوتية',
+                            onPressed: _toggleVoiceRecording,
+                          ),
                         ),
                         Expanded(
                           child: TextField(
@@ -10535,12 +10555,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                           ),
                         ),
                         SizedBox(
-                          width: 62,
+                          width: 48,
                           height: 48,
                           child: IconButton(
-                            icon: const Text(
-                              '🌊',
-                              style: TextStyle(fontSize: 25),
+                            icon: const Icon(
+                              Icons.perm_media_outlined,
+                              color: Colors.white70,
                             ),
                             tooltip: 'إرسال صورة أو فيديو',
                             onPressed: _showMediaPicker,
