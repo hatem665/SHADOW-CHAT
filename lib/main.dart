@@ -3032,57 +3032,43 @@ bool shouldShowSecretGroupsEmptyState({
   return !isPreparing && groupsCount == 0;
 }
 
-Future<String?> ensurePersonalSecretGroup() async {
+Future<String> createSecretGroup({required String title}) async {
   final user = FirebaseAuth.instance.currentUser;
-  if (!firebaseReady || user == null) return null;
+  if (!firebaseReady || user == null) {
+    throw StateError('يلزم تسجيل الدخول لإنشاء مجموعة');
+  }
 
   final firestore = FirebaseFirestore.instance;
-  final roomId = secretGroupRoomId(user.uid);
-  final profileName = user.displayName?.trim();
-  final accountName = profileName == null || profileName.isEmpty
-      ? currentPublicUserId ?? 'مستخدم ${user.uid.substring(0, 6).toUpperCase()}'
-      : profileName;
-  final groupTitle = 'مجموعة $accountName';
+  final roomId =
+      'secret_group_${user.uid}_${firestore.collection('rooms').doc().id}';
+  final groupTitle = sanitizeDisplayName(title);
   final roomRef = firestore.collection('rooms').doc(roomId);
-  final roomSnapshot = await roomRef.get();
-  if (!roomSnapshot.exists) {
-    await roomRef.set({
-      'ownerUid': user.uid,
-      'title': groupTitle,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-  }
+  await roomRef.set({
+    'ownerUid': user.uid,
+    'title': groupTitle,
+    'updatedAt': FieldValue.serverTimestamp(),
+  });
+
   final ownerMembershipRef = roomRef.collection('members').doc(user.uid);
   final groupIndexRef = firestore
       .collection('users')
       .doc(user.uid)
       .collection('secretGroups')
       .doc(roomId);
-  final existingRecords = await Future.wait([
-    ownerMembershipRef.get(),
-    groupIndexRef.get(),
-  ]);
   final batch = firestore.batch();
-  var hasUpdates = false;
-  if (!existingRecords[0].exists) {
-    batch.set(ownerMembershipRef, {
-      'displayName': accountName,
-      'addedBy': user.uid,
-      'role': 'owner',
-      'addedAt': FieldValue.serverTimestamp(),
-    });
-    hasUpdates = true;
-  }
-  if (!existingRecords[1].exists) {
-    batch.set(groupIndexRef, {
-      'roomId': roomId,
-      'ownerUid': user.uid,
-      'title': groupTitle,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-    hasUpdates = true;
-  }
-  if (hasUpdates) await batch.commit();
+  batch.set(ownerMembershipRef, {
+    'displayName': user.displayName ?? currentPublicUserId ?? 'مالك المجموعة',
+    'addedBy': user.uid,
+    'role': 'owner',
+    'addedAt': FieldValue.serverTimestamp(),
+  });
+  batch.set(groupIndexRef, {
+    'roomId': roomId,
+    'ownerUid': user.uid,
+    'title': groupTitle,
+    'updatedAt': FieldValue.serverTimestamp(),
+  });
+  await batch.commit();
   return roomId;
 }
 
@@ -3094,40 +3080,66 @@ class SecretGroupsScreen extends StatefulWidget {
 }
 
 class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
-  bool _isPreparingGroups = true;
+  bool _isPreparingGroups = false;
 
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_prepareGroups());
-  }
-
-  Future<void> _prepareGroups() async {
-    try {
-      setState(() => _isPreparingGroups = true);
-      await ensurePersonalSecretGroup();
-    } catch (error) {
-      debugPrint('Secret groups preparation failed: $error');
-    } finally {
-      if (mounted) {
-        setState(() => _isPreparingGroups = false);
-      }
-    }
-  }
-
-  Future<void> _openOrCreatePersonalGroup() async {
+  Future<void> _createSecretGroup() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null || !firebaseReady) return;
 
+    final titleController = TextEditingController();
+    final groupTitle = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF171D26),
+          title: const Text(
+            'إنشاء مجموعة جديدة',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: TextField(
+            controller: titleController,
+            autofocus: true,
+            maxLength: 60,
+            textCapitalization: TextCapitalization.sentences,
+            style: const TextStyle(color: Colors.white),
+            decoration: const InputDecoration(
+              labelText: 'اسم المجموعة',
+              prefixIcon: Icon(Icons.groups_rounded),
+            ),
+            onSubmitted: (value) {
+              final cleanedTitle = sanitizeDisplayName(value);
+              if (cleanedTitle.isNotEmpty) {
+                Navigator.pop(dialogContext, cleanedTitle);
+              }
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton.icon(
+              onPressed: () {
+                final cleanedTitle =
+                    sanitizeDisplayName(titleController.text);
+                if (cleanedTitle.isNotEmpty) {
+                  Navigator.pop(dialogContext, cleanedTitle);
+                }
+              },
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('إنشاء'),
+            ),
+          ],
+        ),
+      ),
+    );
+    titleController.dispose();
+    if (!mounted || groupTitle == null) return;
+
     try {
       setState(() => _isPreparingGroups = true);
-      final roomId = await ensurePersonalSecretGroup();
-      if (!mounted || roomId == null) return;
-
-      final profileName = user.displayName?.trim();
-      final displayTitle = profileName != null && profileName.isNotEmpty
-          ? 'مجموعة $profileName'
-          : 'مجموعة ${user.uid.substring(0, 6).toUpperCase()}';
+      final roomId = await createSecretGroup(title: groupTitle);
 
       if (!mounted) return;
       Navigator.push(
@@ -3135,12 +3147,20 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
         MaterialPageRoute(
           builder: (_) => SecretChatScreen(
             groupId: roomId,
-            chatTitle: displayTitle,
+            chatTitle: groupTitle,
           ),
         ),
       );
     } catch (error) {
-      debugPrint('Open or create personal secret group failed: $error');
+      debugPrint('Create secret group failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(firebaseWriteFailureMessage(error)),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _isPreparingGroups = false);
@@ -3165,7 +3185,7 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
               padding: const EdgeInsets.only(left: 12),
               child: IconButton(
                 tooltip: 'إنشاء مجموعة سرية',
-                onPressed: _isPreparingGroups ? null : _openOrCreatePersonalGroup,
+                onPressed: _isPreparingGroups ? null : _createSecretGroup,
                 icon: const Icon(Icons.add_rounded, color: Color(0xFF00FF66)),
               ),
             ),
@@ -3272,7 +3292,7 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
                               SizedBox(
                                 width: 210,
                                 child: ElevatedButton.icon(
-                                  onPressed: _isPreparingGroups ? null : _openOrCreatePersonalGroup,
+                                  onPressed: _isPreparingGroups ? null : _createSecretGroup,
                                   style: ElevatedButton.styleFrom(
                                     backgroundColor: const Color(0xFF00FF66),
                                     foregroundColor: Colors.black,
@@ -3283,7 +3303,7 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
                                   ),
                                   icon: const Icon(Icons.lock_open_rounded),
                                   label: const Text(
-                                    'إنشاء مجموعتي',
+                                    'إنشاء مجموعة جديدة',
                                     style: TextStyle(fontWeight: FontWeight.w700),
                                   ),
                                 ),
@@ -4013,6 +4033,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('تمت إضافة $displayName إلى $sectionName')),
           );
+          if (widget.scope == ContactScope.group && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
         }
         return;
       }

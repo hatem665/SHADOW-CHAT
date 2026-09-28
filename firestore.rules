@@ -212,11 +212,15 @@ service cloud.firestore {
     match /rooms/{roomId} {
       allow read: if isPrivateSecretGroup(roomId)
         && (isRoomMember(roomId)
+          || (signedIn() && roomId == 'secret_group_' + request.auth.uid)
           || (signedIn() && resource.data.ownerUid == request.auth.uid));
       allow create: if isPrivateSecretGroup(roomId)
         && signedIn()
-        && roomId == 'secret_group_' + request.auth.uid
-        && request.resource.data.ownerUid == request.auth.uid;
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['ownerUid', 'title', 'updatedAt'])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 60;
       allow update: if isPrivateSecretGroup(roomId)
         && signedIn()
         && resource.data.ownerUid == request.auth.uid
