@@ -3081,6 +3081,108 @@ class SecretGroupsScreen extends StatefulWidget {
 
 class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
   bool _isPreparingGroups = false;
+  final Set<String> _busyGroupIds = <String>{};
+
+  Future<void> _deleteOrLeaveGroup({
+    required String roomId,
+    required String title,
+    required bool isOwner,
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || !firebaseReady || _busyGroupIds.contains(roomId)) return;
+
+    final actionLabel = isOwner ? 'حذف المجموعة' : 'مغادرة المجموعة';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF171D26),
+          title: Text(actionLabel, style: const TextStyle(color: Colors.white)),
+          content: Text(
+            isOwner
+                ? 'سيتم حذف "$title" وأعضائها نهائيًا. هل تريد المتابعة؟'
+                : 'هل تريد مغادرة "$title"؟',
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
+              ),
+              child: Text(actionLabel),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busyGroupIds.add(roomId));
+    try {
+      final firestore = FirebaseFirestore.instance;
+      final roomRef = firestore.collection('rooms').doc(roomId);
+      final groupIndexRef = firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('secretGroups')
+          .doc(roomId);
+
+      if (isOwner) {
+        final members = await roomRef.collection('members').get();
+        final messages = await firestore
+            .collection('chats')
+            .doc(roomId)
+            .collection('messages')
+            .get();
+
+        for (var start = 0; start < messages.docs.length; start += 400) {
+          final batch = firestore.batch();
+          final end = (start + 400).clamp(0, messages.docs.length);
+          for (final message in messages.docs.sublist(start, end)) {
+            batch.delete(message.reference);
+          }
+          await batch.commit();
+        }
+
+        final batch = firestore.batch();
+        for (final member in members.docs) {
+          batch.delete(member.reference);
+        }
+        batch.delete(groupIndexRef);
+        batch.delete(firestore.collection('chats').doc(roomId));
+        batch.delete(roomRef);
+        await batch.commit();
+      } else {
+        await roomRef.collection('members').doc(user.uid).delete();
+        await groupIndexRef.delete();
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(isOwner ? 'تم حذف المجموعة' : 'تمت مغادرة المجموعة')),
+        );
+      }
+    } catch (error) {
+      debugPrint('Secret group removal failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(firebaseWriteFailureMessage(error)),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busyGroupIds.remove(roomId));
+    }
+  }
 
   Future<void> _createSecretGroup() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -3325,6 +3427,7 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
                       final roomId = data['roomId'] as String? ?? group.id;
                       final title = data['title'] as String? ?? 'مجموعة سرية';
                       final isOwner = data['ownerUid'] == user.uid;
+                      final isBusy = _busyGroupIds.contains(roomId);
 
                       return Container(
                         decoration: BoxDecoration(
@@ -3339,74 +3442,7 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
                             ),
                           ],
                         ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            ClipRRect(
-                              borderRadius: const BorderRadius.only(
-                                topLeft: Radius.circular(18),
-                                topRight: Radius.circular(18),
-                              ),
-                              child: Stack(
-                                children: [
-                                  SizedBox(
-                                    height: 120,
-                                    width: double.infinity,
-                                    child: Image.asset(
-                                      'assets/images/whale.jpg',
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (context, error, stackTrace) {
-                                        return Container(
-                                          color: const Color(0xFF0F172A),
-                                          child: const Icon(
-                                            Icons.groups_rounded,
-                                            size: 52,
-                                            color: Color(0xFF00FF66),
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                  Positioned.fill(
-                                    child: DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        gradient: LinearGradient(
-                                          begin: Alignment.topCenter,
-                                          end: Alignment.bottomCenter,
-                                          colors: [
-                                            Colors.transparent,
-                                            Colors.black.withOpacity(0.55),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  Positioned(
-                                    right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 10,
-                                        vertical: 6,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: Colors.black.withOpacity(0.35),
-                                        borderRadius: BorderRadius.circular(999),
-                                      ),
-                                      child: Text(
-                                        isOwner ? 'مجموعتك' : 'سرية',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            ListTile(
+                        child: ListTile(
                               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                               leading: const CircleAvatar(
                                 radius: 22,
@@ -3424,10 +3460,40 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
                                 isOwner ? 'مجموعتك الخاصة' : 'مجموعة تمت دعوتك إليها',
                                 style: const TextStyle(color: Colors.white70),
                               ),
-                              trailing: const Icon(
-                                Icons.chevron_left_rounded,
-                                color: Colors.white70,
-                              ),
+                              trailing: isBusy
+                                  ? const SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Color(0xFF00FF66),
+                                      ),
+                                    )
+                                  : Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          onPressed: () => _deleteOrLeaveGroup(
+                                            roomId: roomId,
+                                            title: title,
+                                            isOwner: isOwner,
+                                          ),
+                                          icon: Icon(
+                                            isOwner
+                                                ? Icons.delete_outline_rounded
+                                                : Icons.logout_rounded,
+                                            color: Colors.redAccent,
+                                          ),
+                                          tooltip: isOwner
+                                              ? 'حذف المجموعة'
+                                              : 'مغادرة المجموعة',
+                                        ),
+                                        const Icon(
+                                          Icons.chevron_left_rounded,
+                                          color: Colors.white70,
+                                        ),
+                                      ],
+                                    ),
                               onTap: () => Navigator.push(
                                 context,
                                 MaterialPageRoute(
@@ -3437,8 +3503,6 @@ class _SecretGroupsScreenState extends State<SecretGroupsScreen> {
                                   ),
                                 ),
                               ),
-                            ),
-                          ],
                         ),
                       );
                     },
@@ -6706,91 +6770,6 @@ class _SecretChatScreenState extends State<SecretChatScreen>
           ),
           child: Column(
             children: [
-              Container(
-                margin: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-                height: 170,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(24),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x33000000),
-                      blurRadius: 12,
-                      offset: Offset(0, 5),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(24),
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: Image.asset(
-                          'assets/images/whale.jpg',
-                          fit: BoxFit.cover,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Container(
-                              color: const Color(0xFF101B1F),
-                              child: const Icon(
-                                Icons.lock_rounded,
-                                size: 52,
-                                color: Color(0xFF38E8A5),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                      Positioned.fill(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topCenter,
-                              end: Alignment.bottomCenter,
-                              colors: [
-                                Colors.transparent,
-                                const Color(0xFF0B1016).withOpacity(0.68),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        left: 14,
-                        bottom: 14,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 7,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.28),
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(
-                                Icons.shield_rounded,
-                                color: Color(0xFF38E8A5),
-                                size: 16,
-                              ),
-                              const SizedBox(width: 7),
-                              Text(
-                                widget.chatTitle.contains('الغرفة السوداء')
-                                    ? 'Shadow Ops'
-                                    : 'مجموعة سرية',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 11.5,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
               Container(
                 margin: const EdgeInsets.fromLTRB(14, 0, 14, 4),
                 padding: const EdgeInsets.symmetric(

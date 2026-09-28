@@ -106,8 +106,10 @@ service cloud.firestore {
         && request.resource.data.get('deletedFor', []).hasAll([request.auth.uid])
         && request.resource.data.get('deletedFor', []).size()
           <= resource.data.get('deletedFor', []).size() + 1;
-      allow delete: if canAccessChat(chatId)
-        && resource.data.uid == request.auth.uid;
+      allow delete: if (canAccessChat(chatId)
+          && resource.data.uid == request.auth.uid)
+        || (isPrivateSecretGroup(chatId)
+          && isPrivateSecretGroupOwner(chatId));
     }
 
     match /chats/{chatId} {
@@ -129,7 +131,9 @@ service cloud.firestore {
           )
         );
       allow update: if canAccessChat(chatId);
-      allow delete: if isDirectChatParticipant(chatId);
+      allow delete: if isDirectChatParticipant(chatId)
+        || (isPrivateSecretGroup(chatId)
+          && isPrivateSecretGroupOwner(chatId));
     }
 
     match /users/{userId}/groupContacts/{contactId} {
@@ -225,7 +229,9 @@ service cloud.firestore {
         && signedIn()
         && resource.data.ownerUid == request.auth.uid
         && request.resource.data.ownerUid == resource.data.ownerUid;
-      allow delete: if false;
+      allow delete: if isPrivateSecretGroup(roomId)
+        && signedIn()
+        && resource.data.ownerUid == request.auth.uid;
     }
 
     match /rooms/{roomId}/members/{memberId} {
