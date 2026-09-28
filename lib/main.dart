@@ -4388,7 +4388,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                                         ),
                                         const SizedBox(height: 8),
                                         SizedBox(
-                                          height: 240,
+                                          height: 300,
                                           child: ListView.separated(
                                             primary: false,
                                             cacheExtent: 120,
@@ -4508,38 +4508,79 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       },
                     ),
                   if (_canAddScopedContacts) ...[
-                    TextField(
-                      controller: _contactIdController,
-                      style: const TextStyle(color: Colors.white),
-                      decoration: const InputDecoration(
-                        labelText: 'المعرّف السهل',
-                        hintText: 'SC-A1B2C3',
-                        prefixIcon: Icon(Icons.badge_outlined),
-                      ),
-                    ),
-                    TextField(
-                      controller: _nameController,
-                      style: const TextStyle(color: Colors.white),
-                      decoration: const InputDecoration(
-                        labelText: 'اسم جهة الاتصال',
-                        prefixIcon: Icon(Icons.person_outline),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
+                    Container(
                       width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _addContact,
-                        icon: const Icon(Icons.person_add_alt_1),
-                        label: Text(
-                          widget.scope == ContactScope.regular
-                              ? 'إرسال طلب'
-                              : 'إضافة عضو',
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF38E8A5),
-                          foregroundColor: Colors.black,
-                        ),
+                      margin: const EdgeInsets.only(top: 12, bottom: 12),
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0F1C1A),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'إضافة يدوية بالمعرّف',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'أدخل المعرّف السهل للمستخدم لإضافته مباشرة',
+                            style: TextStyle(color: Colors.white70, fontSize: 12),
+                          ),
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: _contactIdController,
+                            style: const TextStyle(color: Colors.white),
+                            textDirection: TextDirection.ltr,
+                            textAlign: TextAlign.start,
+                            decoration: const InputDecoration(
+                              labelText: 'المعرّف السهل',
+                              hintText: 'SC-A1B2C3',
+                              labelStyle: TextStyle(color: Colors.white70),
+                              hintStyle: TextStyle(color: Colors.white54),
+                              prefixIcon: Icon(
+                                Icons.badge_outlined,
+                                color: Color(0xFF38E8A5),
+                              ),
+                              filled: true,
+                              fillColor: Color(0xFF14231F),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _nameController,
+                            style: const TextStyle(color: Colors.white),
+                            decoration: const InputDecoration(
+                              labelText: 'اسم جهة الاتصال (اختياري)',
+                              prefixIcon: Icon(Icons.person_outline),
+                              filled: true,
+                              fillColor: Color(0xFF14231F),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: _addContact,
+                              icon: const Icon(Icons.person_add_alt_1),
+                              label: Text(
+                                widget.scope == ContactScope.regular
+                                    ? 'إرسال طلب'
+                                    : 'إضافة عضو',
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF38E8A5),
+                                foregroundColor: Colors.black,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ] else if (widget.scope == ContactScope.room) ...[
@@ -7083,15 +7124,17 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                         maxLines: 4,
                         textInputAction: TextInputAction.newline,
                         decoration: InputDecoration(
+                          filled: false,
+                          fillColor: Colors.transparent,
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 10,
                             vertical: 11,
                           ),
                           hintText: 'اكتب رسالتك السرية',
                           hintStyle: TextStyle(
-                            color: const Color(0xFFEAF4F0).withOpacity(0.82),
+                            color: const Color(0xFFEAF4F0).withOpacity(0.9),
                             fontSize: 14,
-                            fontWeight: FontWeight.w600,
+                            fontWeight: FontWeight.w700,
                           ),
                           border: InputBorder.none,
                           enabledBorder: InputBorder.none,
@@ -10175,20 +10218,38 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               : const Color(0xFFF4F7F6),
           body: Stack(
             children: [
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Color(0xFF101716),
-                        Color(0xFF0D1412),
-                      ],
-                    ),
-                  ),
+              if (isDark)
+                ValueListenableBuilder<bool>(
+                  valueListenable: whaleMotionNotifier,
+                  builder: (context, isMoving, child) {
+                    return AnimatedBuilder(
+                      animation: _whaleAnimation,
+                      child: Image.asset(
+                        'assets/images/whale.jpg',
+                        fit: BoxFit.cover,
+                        cacheWidth: 896,
+                        errorBuilder: (context, error, stackTrace) =>
+                            Container(color: const Color(0xFF101716)),
+                      ),
+                      builder: (context, child) {
+                        return Positioned.fill(
+                          child: RepaintBoundary(
+                            child: Transform.translate(
+                              offset: isMoving
+                                  ? Offset(0, _whaleAnimation.value)
+                                  : Offset.zero,
+                              child: Transform.scale(scale: 1.08, child: child),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
                 ),
-              ),
+              if (isDark)
+                Positioned.fill(
+                  child: Container(color: Colors.black.withOpacity(0.35)),
+                ),
               SafeArea(
                 child: Column(
                   children: [
@@ -10351,18 +10412,21 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                             maxLines: 4,
                             textInputAction: TextInputAction.newline,
                             decoration: InputDecoration(
-                              filled: false,
+                              filled: true,
+                              fillColor: const Color(0xFF11201E),
                               contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 9,
+                                horizontal: 10,
+                                vertical: 11,
                               ),
                               hintText: 'اكتب رسالتك هنا',
-                              hintStyle: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+                              hintStyle: TextStyle(
+                                color: const Color(0xFFEAF4F0).withOpacity(0.9),
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
                               ),
                               border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
                             ),
                             onSubmitted: (_) => _sendMessage(),
                           ),
